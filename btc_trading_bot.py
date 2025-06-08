@@ -31,14 +31,14 @@ logging.basicConfig(
 class BTCTradingBot:
     def __init__(self):
         """Initialize the Bitcoin trading bot with PostgreSQL."""
-        # Initialize Binance exchange (no API keys needed for public data)
-        self.exchange = ccxt.binance({
-            'sandbox': False,  # Use real Binance for market data
+        # Initialize exchange (Kraken is more cloud-friendly than Binance)
+        self.exchange = ccxt.kraken({
+            'sandbox': False,  # Use real Kraken for market data
             'enableRateLimit': True,
         })
         
         # Trading parameters
-        self.symbol = 'BTC/USDT'
+        self.symbol = 'BTC/USDT'  # Kraken uses this symbol too
         self.timeframe = '1h'
         self.candles_limit = 500  # Fetch more candles to ensure we have enough data
         
