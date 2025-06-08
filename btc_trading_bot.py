@@ -54,14 +54,15 @@ class BTCTradingBot:
         self.entry_price = None
         self.last_signal_time = None
         
-        # Portfolio simulation
-        self.starting_balance = 10000.0  # Start with $10,000 USD
-        self.current_balance = self.starting_balance
-        self.btc_holdings = 0.0  # Amount of BTC owned
+        # Portfolio simulation - Start with $10K worth of BTC instead of USD
+        self.starting_balance = 10000.0  # Track $10,000 equivalent for performance
+        self.current_balance = 100.0  # Small USD balance for trading fees/flexibility
+        self.btc_holdings = 0.0  # Will be calculated based on current BTC price
         self.position_size_pct = 0.95  # Use 95% of balance for each trade
         self.trade_count = 0
         self.winning_trades = 0
         self.losing_trades = 0
+        self.initial_btc_value = 10000.0  # Track initial BTC value in USD
         
         # Database connection
         self.db_url = os.getenv('DATABASE_URL')
@@ -144,6 +145,29 @@ class BTCTradingBot:
             logging.error(f"Error initializing database: {e}")
             raise
 
+    def _initialize_btc_holdings(self):
+        """Initialize BTC holdings based on $10,000 worth at current price."""
+        try:
+            current_price = self.get_current_price()
+            if current_price > 0:
+                # Calculate BTC amount for $10,000
+                initial_btc_amount = self.initial_btc_value / current_price
+                self.btc_holdings = initial_btc_amount
+                self.position = 'long'  # Start with a long position in BTC
+                self.entry_price = current_price
+                
+                logging.info(f"Initialized with {initial_btc_amount:.6f} BTC (${self.initial_btc_value:,.2f} worth) at ${current_price:,.2f}")
+                
+                # Save initial state
+                self._save_bot_state()
+                return True
+            else:
+                logging.error("Could not fetch current BTC price for initialization")
+                return False
+        except Exception as e:
+            logging.error(f"Error initializing BTC holdings: {e}")
+            return False
+
     def _load_bot_state(self):
         """Load bot state from database."""
         try:
@@ -161,9 +185,12 @@ class BTCTradingBot:
                         self.trade_count = state['trade_count']
                         self.winning_trades = state['winning_trades']
                         self.losing_trades = state['losing_trades']
-                        logging.info(f"Loaded bot state: position={self.position}, entry_price={self.entry_price}, current_balance={self.current_balance}, btc_holdings={self.btc_holdings}, trade_count={self.trade_count}, winning_trades={self.winning_trades}, losing_trades={self.losing_trades}")
+                        logging.info(f"Loaded bot state: position={self.position}, entry_price={self.entry_price}, current_balance=${self.current_balance:,.2f}, btc_holdings={self.btc_holdings:.6f}, trade_count={self.trade_count}")
                     else:
-                        logging.info("No previous bot state found, starting fresh")
+                        logging.info("No previous bot state found - initializing with $10,000 worth of BTC")
+                        # Initialize with BTC holdings instead of USD
+                        if not self._initialize_btc_holdings():
+                            logging.error("Failed to initialize BTC holdings")
                         
         except Exception as e:
             logging.error(f"Error loading bot state: {e}")
@@ -419,17 +446,17 @@ class BTCTradingBot:
         try:
             # Calculate current portfolio value
             current_portfolio_value = self.current_balance
+            current_price = self.get_current_price()
+            
             if self.position == 'long' and self.btc_holdings > 0:
                 # Add current value of BTC holdings
-                current_price = self.get_current_price()
                 current_portfolio_value += self.btc_holdings * current_price
             elif self.position == 'short' and self.btc_holdings > 0:
                 # For short positions, calculate unrealized P&L
-                current_price = self.get_current_price()
                 unrealized_pnl = (self.entry_price - current_price) * self.btc_holdings
-                current_portfolio_value += unrealized_pnl
+                current_portfolio_value += unrealized_pnl + (self.btc_holdings * self.entry_price)
             
-            # Calculate performance metrics
+            # Calculate performance metrics (compared to initial $10K BTC value)
             total_return = ((current_portfolio_value - self.starting_balance) / self.starting_balance) * 100
             win_rate = (self.winning_trades / self.trade_count * 100) if self.trade_count > 0 else 0
             
@@ -438,6 +465,7 @@ class BTCTradingBot:
                 'current_balance': self.current_balance,
                 'btc_holdings': self.btc_holdings,
                 'current_portfolio_value': current_portfolio_value,
+                'current_btc_price': current_price,
                 'total_return_pct': total_return,
                 'total_pnl': current_portfolio_value - self.starting_balance,
                 'trade_count': self.trade_count,
@@ -445,7 +473,8 @@ class BTCTradingBot:
                 'losing_trades': self.losing_trades,
                 'win_rate_pct': win_rate,
                 'current_position': self.position,
-                'entry_price': self.entry_price
+                'entry_price': self.entry_price,
+                'started_with_btc': True  # Flag to indicate we started with BTC
             }
         except Exception as e:
             logging.error(f"Error calculating trading stats: {str(e)}")
@@ -623,9 +652,10 @@ class BTCTradingBot:
         print(f"Reason: {result.get('reason', 'N/A')}")
         
         print(f"\n=== Portfolio Performance ===")
-        print(f"Starting Balance: ${stats.get('starting_balance', 0):,.2f}")
+        print(f"Started with: ${self.initial_btc_value:,.2f} worth of BTC")
         print(f"Current Balance: ${stats.get('current_balance', 0):,.2f}")
-        print(f"BTC Holdings: {stats.get('btc_holdings', 0):.6f}")
+        print(f"BTC Holdings: {stats.get('btc_holdings', 0):.6f} BTC")
+        print(f"Current BTC Price: ${stats.get('current_btc_price', 0):,.2f}")
         print(f"Portfolio Value: ${stats.get('current_portfolio_value', 0):,.2f}")
         print(f"Total Return: {stats.get('total_return_pct', 0):+.2f}%")
         print(f"Total P&L: ${stats.get('total_pnl', 0):+,.2f}")
