@@ -8,6 +8,7 @@ import pandas as pd
 import psycopg2
 from psycopg2.extras import RealDictCursor
 from datetime import datetime, timedelta
+import sys
 
 def get_db_connection():
     """Get database connection."""
@@ -156,6 +157,102 @@ def export_market_data_to_csv(filename="btc_market_data_export.csv"):
     except Exception as e:
         print(f"❌ Error exporting market data: {e}")
 
+def get_database_url():
+    """Get database URL from environment variables"""
+    return os.getenv('DATABASE_URL')
+
+def download_portfolio_stats():
+    """Download and display comprehensive portfolio statistics"""
+    database_url = get_database_url()
+    if not database_url:
+        print("❌ DATABASE_URL environment variable not found")
+        return
+    
+    try:
+        with psycopg2.connect(database_url) as conn:
+            with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                # Get current bot state
+                cur.execute("SELECT * FROM bot_state ORDER BY updated_at DESC LIMIT 1")
+                bot_state = cur.fetchone()
+                
+                # Get all trades
+                cur.execute("SELECT * FROM trades ORDER BY timestamp DESC")
+                trades = cur.fetchall()
+                
+                # Get latest market data
+                cur.execute("SELECT * FROM market_data ORDER BY timestamp DESC LIMIT 1")
+                latest_market = cur.fetchone()
+                
+                print("🤖 BTC Trading Bot - Portfolio Performance Report")
+                print("=" * 60)
+                
+                if bot_state:
+                    print(f"\n📊 Current Portfolio Status:")
+                    print(f"   Starting Balance: ${bot_state['current_balance'] + bot_state['btc_holdings'] * (latest_market['close'] if latest_market else 100000):,.2f}")
+                    print(f"   Current Balance: ${bot_state['current_balance']:,.2f}")
+                    print(f"   BTC Holdings: {bot_state['btc_holdings']:.6f} BTC")
+                    
+                    # Calculate current portfolio value
+                    current_btc_price = latest_market['close'] if latest_market else 100000
+                    current_portfolio_value = bot_state['current_balance']
+                    
+                    if bot_state['position'] == 'long' and bot_state['btc_holdings'] > 0:
+                        current_portfolio_value += bot_state['btc_holdings'] * current_btc_price
+                    elif bot_state['position'] == 'short' and bot_state['btc_holdings'] > 0:
+                        unrealized_pnl = (bot_state['entry_price'] - current_btc_price) * bot_state['btc_holdings']
+                        current_portfolio_value += unrealized_pnl
+                    
+                    # Assuming starting balance was $10,000
+                    starting_balance = 10000.0
+                    total_return = ((current_portfolio_value - starting_balance) / starting_balance) * 100
+                    win_rate = (bot_state['winning_trades'] / bot_state['trade_count'] * 100) if bot_state['trade_count'] > 0 else 0
+                    
+                    print(f"   Portfolio Value: ${current_portfolio_value:,.2f}")
+                    print(f"   Total Return: {total_return:+.2f}%")
+                    print(f"   Total P&L: ${current_portfolio_value - starting_balance:+,.2f}")
+                    
+                    print(f"\n📈 Trading Statistics:")
+                    print(f"   Total Trades: {bot_state['trade_count']}")
+                    print(f"   Winning Trades: {bot_state['winning_trades']}")
+                    print(f"   Losing Trades: {bot_state['losing_trades']}")
+                    print(f"   Win Rate: {win_rate:.1f}%")
+                    print(f"   Current Position: {bot_state['position'] or 'None'}")
+                    if bot_state['entry_price']:
+                        print(f"   Entry Price: ${bot_state['entry_price']:,.2f}")
+                
+                if latest_market:
+                    print(f"\n💰 Latest Market Data:")
+                    print(f"   Current BTC Price: ${latest_market['close']:,.2f}")
+                    print(f"   24h High: ${latest_market['high']:,.2f}")
+                    print(f"   24h Low: ${latest_market['low']:,.2f}")
+                    print(f"   Volume: {latest_market['volume']:,.2f} BTC")
+                
+                if trades:
+                    print(f"\n📋 Recent Trades (Last 10):")
+                    print("-" * 60)
+                    for trade in trades[:10]:
+                        timestamp = trade['timestamp'].strftime("%Y-%m-%d %H:%M:%S")
+                        print(f"   {timestamp} | {trade['signal']} | ${trade['price']:,.2f}")
+                        if trade['btc_amount'] and trade['usd_amount']:
+                            print(f"      Amount: {trade['btc_amount']:.6f} BTC (${trade['usd_amount']:,.2f})")
+                            if trade['portfolio_value']:
+                                print(f"      Portfolio Value: ${trade['portfolio_value']:,.2f}")
+                        print()
+                    
+                    print(f"📊 Total Trades in Database: {len(trades)}")
+                else:
+                    print("\n📋 No trades found in database")
+                
+                # Save to CSV for analysis
+                if trades:
+                    df = pd.DataFrame([dict(trade) for trade in trades])
+                    filename = f"btc_trades_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+                    df.to_csv(filename, index=False)
+                    print(f"\n💾 Trades exported to: {filename}")
+                
+    except Exception as e:
+        print(f"❌ Error: {e}")
+
 def main():
     """Main function with menu options."""
     if not get_db_connection():
@@ -166,7 +263,7 @@ def main():
     print("1. View trading summary")
     print("2. Export trades to CSV")
     print("3. Export market data to CSV")
-    print("4. View all data")
+    print("4. View portfolio stats")
     print("")
     
     choice = input("Choose option (1-4) or press Enter for summary: ").strip()
@@ -178,10 +275,7 @@ def main():
     elif choice == "3":
         export_market_data_to_csv()
     elif choice == "4":
-        display_trading_summary()
-        print("\n" + "="*60)
-        export_trades_to_csv()
-        export_market_data_to_csv()
+        download_portfolio_stats()
     else:
         print("Invalid choice. Showing summary...")
         display_trading_summary()
