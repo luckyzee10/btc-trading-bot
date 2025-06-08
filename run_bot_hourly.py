@@ -2,20 +2,19 @@
 """
 Periodic Bitcoin Trading Bot Runner
 Runs the BTC trading bot every hour automatically.
+Uses PostgreSQL for data persistence.
 """
 
 import time
 import schedule
-from btc_trading_bot import BTCTradingBot, DATA_DIR
+from btc_trading_bot import BTCTradingBot
 import logging
-import os
 
-# Configure logging with persistent path
+# Configure logging (PostgreSQL handles data persistence)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(DATA_DIR, 'periodic_bot.log')),
         logging.StreamHandler()
     ]
 )
@@ -43,6 +42,7 @@ def main():
     """Main function to set up periodic execution."""
     print("Bitcoin Trading Bot - Hourly Scheduler")
     print("This will run the trading bot analysis every hour.")
+    print("All data is stored in PostgreSQL database.")
     print("Press Ctrl+C to stop the scheduler.")
     print("-" * 50)
     

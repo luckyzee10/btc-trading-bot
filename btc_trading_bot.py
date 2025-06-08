@@ -3,36 +3,34 @@
 Bitcoin Trading Bot
 A paper trading bot that analyzes BTC/USDT on Binance using technical indicators
 and generates buy/sell signals based on predefined conditions.
+Uses PostgreSQL for data persistence.
 """
 
 import ccxt
 import pandas as pd
 import numpy as np
 import ta
-import csv
 import time
 import logging
 from datetime import datetime, timedelta
 import os
+import psycopg2
+from psycopg2.extras import RealDictCursor
+import json
 from typing import Dict, List, Optional, Tuple
 
-# Create data directory for persistent storage
-DATA_DIR = os.getenv('DATA_DIR', '/app/data') if os.path.exists('/app/data') else 'data'
-os.makedirs(DATA_DIR, exist_ok=True)
-
-# Configure logging with persistent path
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler(os.path.join(DATA_DIR, 'trading_bot.log')),
         logging.StreamHandler()
     ]
 )
 
 class BTCTradingBot:
     def __init__(self):
-        """Initialize the Bitcoin trading bot."""
+        """Initialize the Bitcoin trading bot with PostgreSQL."""
         # Initialize Binance exchange (no API keys needed for public data)
         self.exchange = ccxt.binance({
             'sandbox': False,  # Use real Binance for market data
@@ -56,28 +54,121 @@ class BTCTradingBot:
         self.entry_price = None
         self.last_signal_time = None
         
-        # CSV file for trade logging (persistent storage)
-        self.trades_file = os.path.join(DATA_DIR, 'trades.csv')
-        self._initialize_trades_csv()
+        # Database connection
+        self.db_url = os.getenv('DATABASE_URL')
+        if not self.db_url:
+            logging.error("DATABASE_URL environment variable not found!")
+            raise ValueError("PostgreSQL connection required. Add DATABASE_URL environment variable.")
         
-        logging.info("Bitcoin Trading Bot initialized successfully")
-        logging.info(f"Data directory: {DATA_DIR}")
-        logging.info(f"Trades file: {self.trades_file}")
+        # Initialize database
+        self._initialize_database()
+        
+        logging.info("Bitcoin Trading Bot initialized successfully with PostgreSQL")
 
-    def _initialize_trades_csv(self):
-        """Initialize the trades CSV file with headers if it doesn't exist."""
-        if not os.path.exists(self.trades_file):
-            with open(self.trades_file, 'w', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    'timestamp', 'price', 'signal', 'reason', 'rsi', 
-                    'bb_upper', 'bb_middle', 'bb_lower', 'ema_200', 'atr'
-                ])
-            logging.info(f"Created trades CSV file: {self.trades_file}")
+    def _get_db_connection(self):
+        """Get database connection."""
+        return psycopg2.connect(self.db_url)
+
+    def _initialize_database(self):
+        """Initialize the database tables if they don't exist."""
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    # Create trades table
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS trades (
+                            id SERIAL PRIMARY KEY,
+                            timestamp TIMESTAMP NOT NULL,
+                            price DECIMAL(15, 2) NOT NULL,
+                            signal VARCHAR(10) NOT NULL,
+                            reason TEXT NOT NULL,
+                            rsi DECIMAL(6, 2),
+                            bb_upper DECIMAL(15, 2),
+                            bb_middle DECIMAL(15, 2),
+                            bb_lower DECIMAL(15, 2),
+                            ema_200 DECIMAL(15, 2),
+                            atr DECIMAL(10, 2),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    
+                    # Create bot_state table for position tracking
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS bot_state (
+                            id SERIAL PRIMARY KEY,
+                            position VARCHAR(10),
+                            entry_price DECIMAL(15, 2),
+                            last_signal_time TIMESTAMP,
+                            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    
+                    # Create market_data table for storing OHLCV data
+                    cur.execute("""
+                        CREATE TABLE IF NOT EXISTS market_data (
+                            id SERIAL PRIMARY KEY,
+                            timestamp TIMESTAMP UNIQUE NOT NULL,
+                            open_price DECIMAL(15, 2) NOT NULL,
+                            high_price DECIMAL(15, 2) NOT NULL,
+                            low_price DECIMAL(15, 2) NOT NULL,
+                            close_price DECIMAL(15, 2) NOT NULL,
+                            volume DECIMAL(20, 8) NOT NULL,
+                            rsi DECIMAL(6, 2),
+                            bb_upper DECIMAL(15, 2),
+                            bb_middle DECIMAL(15, 2),
+                            bb_lower DECIMAL(15, 2),
+                            ema_200 DECIMAL(15, 2),
+                            atr DECIMAL(10, 2),
+                            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                        )
+                    """)
+                    
+                    conn.commit()
+                    logging.info("Database tables initialized successfully")
+                    
+                    # Load bot state
+                    self._load_bot_state()
+                    
+        except Exception as e:
+            logging.error(f"Error initializing database: {e}")
+            raise
+
+    def _load_bot_state(self):
+        """Load bot state from database."""
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    cur.execute("SELECT * FROM bot_state ORDER BY updated_at DESC LIMIT 1")
+                    state = cur.fetchone()
+                    
+                    if state:
+                        self.position = state['position']
+                        self.entry_price = float(state['entry_price']) if state['entry_price'] else None
+                        self.last_signal_time = state['last_signal_time']
+                        logging.info(f"Loaded bot state: position={self.position}, entry_price={self.entry_price}")
+                    else:
+                        logging.info("No previous bot state found, starting fresh")
+                        
+        except Exception as e:
+            logging.error(f"Error loading bot state: {e}")
+
+    def _save_bot_state(self):
+        """Save current bot state to database."""
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO bot_state (position, entry_price, last_signal_time)
+                        VALUES (%s, %s, %s)
+                    """, (self.position, self.entry_price, self.last_signal_time))
+                    conn.commit()
+                    
+        except Exception as e:
+            logging.error(f"Error saving bot state: {e}")
 
     def fetch_ohlcv_data(self) -> pd.DataFrame:
         """
-        Fetch OHLCV data from Binance.
+        Fetch OHLCV data from Binance and store in database.
         
         Returns:
             DataFrame with OHLCV data and datetime index
@@ -95,6 +186,9 @@ class BTCTradingBot:
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
             
+            # Store latest data in database
+            self._store_market_data(df)
+            
             logging.info(f"Fetched {len(df)} candles for {self.symbol}")
             return df
             
@@ -102,9 +196,39 @@ class BTCTradingBot:
             logging.error(f"Error fetching OHLCV data: {e}")
             raise
 
+    def _store_market_data(self, df: pd.DataFrame):
+        """Store market data in PostgreSQL."""
+        try:
+            # Get the latest candle only to avoid duplicates
+            latest_candle = df.iloc[-1]
+            
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO market_data (timestamp, open_price, high_price, low_price, close_price, volume)
+                        VALUES (%s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (timestamp) DO UPDATE SET
+                            open_price = EXCLUDED.open_price,
+                            high_price = EXCLUDED.high_price,
+                            low_price = EXCLUDED.low_price,
+                            close_price = EXCLUDED.close_price,
+                            volume = EXCLUDED.volume
+                    """, (
+                        latest_candle.name,
+                        float(latest_candle['open']),
+                        float(latest_candle['high']),
+                        float(latest_candle['low']),
+                        float(latest_candle['close']),
+                        float(latest_candle['volume'])
+                    ))
+                    conn.commit()
+                    
+        except Exception as e:
+            logging.error(f"Error storing market data: {e}")
+
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """
-        Calculate technical indicators.
+        Calculate technical indicators and update database.
         
         Args:
             df: DataFrame with OHLCV data
@@ -143,12 +267,43 @@ class BTCTradingBot:
             # ATR moving average for comparison
             df['atr_ma'] = df['atr'].rolling(window=20).mean()
             
+            # Update latest indicators in database
+            self._update_indicators_in_db(df.iloc[-1])
+            
             logging.info("Technical indicators calculated successfully")
             return df
             
         except Exception as e:
             logging.error(f"Error calculating indicators: {e}")
             raise
+
+    def _update_indicators_in_db(self, latest_row):
+        """Update technical indicators in database for the latest timestamp."""
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        UPDATE market_data SET
+                            rsi = %s,
+                            bb_upper = %s,
+                            bb_middle = %s,
+                            bb_lower = %s,
+                            ema_200 = %s,
+                            atr = %s
+                        WHERE timestamp = %s
+                    """, (
+                        float(latest_row['rsi']) if not pd.isna(latest_row['rsi']) else None,
+                        float(latest_row['bb_upper']) if not pd.isna(latest_row['bb_upper']) else None,
+                        float(latest_row['bb_middle']) if not pd.isna(latest_row['bb_middle']) else None,
+                        float(latest_row['bb_lower']) if not pd.isna(latest_row['bb_lower']) else None,
+                        float(latest_row['ema_200']) if not pd.isna(latest_row['ema_200']) else None,
+                        float(latest_row['atr']) if not pd.isna(latest_row['atr']) else None,
+                        latest_row.name
+                    ))
+                    conn.commit()
+                    
+        except Exception as e:
+            logging.error(f"Error updating indicators in database: {e}")
 
     def generate_signals(self, df: pd.DataFrame) -> Tuple[Optional[str], str, Dict]:
         """
@@ -214,7 +369,7 @@ class BTCTradingBot:
 
     def log_trade(self, timestamp: datetime, price: float, signal: str, reason: str, indicators: Dict):
         """
-        Log trade to CSV file.
+        Log trade to PostgreSQL database.
         
         Args:
             timestamp: Trade timestamp
@@ -224,25 +379,57 @@ class BTCTradingBot:
             indicators: Dictionary of indicator values
         """
         try:
-            with open(self.trades_file, 'a', newline='') as f:
-                writer = csv.writer(f)
-                writer.writerow([
-                    timestamp.strftime('%Y-%m-%d %H:%M:%S'),
-                    price,
-                    signal,
-                    reason,
-                    round(indicators.get('rsi', 0), 2),
-                    round(indicators.get('bb_upper', 0), 2),
-                    round(indicators.get('bb_middle', 0), 2),
-                    round(indicators.get('bb_lower', 0), 2),
-                    round(indicators.get('ema_200', 0), 2),
-                    round(indicators.get('atr', 0), 2)
-                ])
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO trades (timestamp, price, signal, reason, rsi, bb_upper, bb_middle, bb_lower, ema_200, atr)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    """, (
+                        timestamp,
+                        price,
+                        signal,
+                        reason,
+                        round(indicators.get('rsi', 0), 2),
+                        round(indicators.get('bb_upper', 0), 2),
+                        round(indicators.get('bb_middle', 0), 2),
+                        round(indicators.get('bb_lower', 0), 2),
+                        round(indicators.get('ema_200', 0), 2),
+                        round(indicators.get('atr', 0), 2)
+                    ))
+                    conn.commit()
             
-            logging.info(f"Trade logged: {signal} at {price} - {reason}")
+            logging.info(f"Trade logged to database: {signal} at {price} - {reason}")
             
         except Exception as e:
-            logging.error(f"Error logging trade: {e}")
+            logging.error(f"Error logging trade to database: {e}")
+
+    def get_trading_stats(self) -> Dict:
+        """Get trading statistics from database."""
+        try:
+            with self._get_db_connection() as conn:
+                with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                    # Get total trades
+                    cur.execute("SELECT COUNT(*) as total_trades FROM trades")
+                    total_trades = cur.fetchone()['total_trades']
+                    
+                    # Get buy/sell counts
+                    cur.execute("SELECT signal, COUNT(*) as count FROM trades GROUP BY signal")
+                    signal_counts = {row['signal']: row['count'] for row in cur.fetchall()}
+                    
+                    # Get recent trades
+                    cur.execute("SELECT * FROM trades ORDER BY timestamp DESC LIMIT 10")
+                    recent_trades = cur.fetchall()
+                    
+                    return {
+                        'total_trades': total_trades,
+                        'buy_signals': signal_counts.get('BUY', 0),
+                        'sell_signals': signal_counts.get('SELL', 0),
+                        'recent_trades': recent_trades
+                    }
+                    
+        except Exception as e:
+            logging.error(f"Error getting trading stats: {e}")
+            return {}
 
     def execute_trading_logic(self) -> Dict:
         """
@@ -278,15 +465,25 @@ class BTCTradingBot:
                     # Log the trade
                     self.log_trade(current_time, current_price, signal, reason, indicators)
                     
+                    # Save bot state
+                    self._save_bot_state()
+                    
                 elif signal == 'SELL' and self.position == 'long':
                     profit_loss = current_price - self.entry_price if self.entry_price else 0
                     self.position = None
+                    old_entry_price = self.entry_price
                     self.entry_price = None
                     self.last_signal_time = current_time
                     
                     # Log the trade with P&L info
-                    reason_with_pnl = f"{reason} | P&L: {profit_loss:.2f} USDT"
+                    reason_with_pnl = f"{reason} | P&L: {profit_loss:.2f} USDT (bought at {old_entry_price:.2f})"
                     self.log_trade(current_time, current_price, signal, reason_with_pnl, indicators)
+                    
+                    # Save bot state
+                    self._save_bot_state()
+            
+            # Get trading stats
+            stats = self.get_trading_stats()
             
             # Prepare result summary
             result = {
@@ -297,7 +494,8 @@ class BTCTradingBot:
                 'position': self.position,
                 'entry_price': self.entry_price,
                 'indicators': indicators,
-                'candles_analyzed': len(df)
+                'candles_analyzed': len(df),
+                'trading_stats': stats
             }
             
             # Log current status
@@ -349,6 +547,14 @@ class BTCTradingBot:
         if result['reason']:
             print(f"\nReason: {result['reason']}")
         
+        # Show trading stats
+        stats = result.get('trading_stats', {})
+        if stats:
+            print(f"\nTRADING STATISTICS:")
+            print(f"Total trades: {stats.get('total_trades', 0)}")
+            print(f"Buy signals: {stats.get('buy_signals', 0)}")
+            print(f"Sell signals: {stats.get('sell_signals', 0)}")
+        
         print(f"\nCandles Analyzed: {result['candles_analyzed']}")
         print("="*60)
 
@@ -362,7 +568,7 @@ def main():
         print("Bitcoin Trading Bot Started!")
         print("This is a PAPER TRADING bot - no real trades will be executed.")
         print(f"Monitoring {bot.symbol} on {bot.timeframe} timeframe")
-        print(f"Trades will be logged to: {bot.trades_file}")
+        print("Trades will be logged to PostgreSQL database")
         print("-" * 60)
         
         # Run a single analysis
@@ -372,8 +578,7 @@ def main():
         bot.print_current_status(result)
         
         print("\nBot analysis completed successfully!")
-        print("To run this periodically, you can set up a cron job or scheduler.")
-        print("Example: Run every hour with 'python btc_trading_bot.py'")
+        print("Data is persisted in PostgreSQL database.")
         
     except KeyboardInterrupt:
         print("\nBot stopped by user.")
