@@ -16,12 +16,16 @@ from datetime import datetime, timedelta
 import os
 from typing import Dict, List, Optional, Tuple
 
-# Configure logging
+# Create data directory for persistent storage
+DATA_DIR = os.getenv('DATA_DIR', '/app/data') if os.path.exists('/app/data') else 'data'
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# Configure logging with persistent path
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('trading_bot.log'),
+        logging.FileHandler(os.path.join(DATA_DIR, 'trading_bot.log')),
         logging.StreamHandler()
     ]
 )
@@ -52,11 +56,13 @@ class BTCTradingBot:
         self.entry_price = None
         self.last_signal_time = None
         
-        # CSV file for trade logging
-        self.trades_file = 'trades.csv'
+        # CSV file for trade logging (persistent storage)
+        self.trades_file = os.path.join(DATA_DIR, 'trades.csv')
         self._initialize_trades_csv()
         
         logging.info("Bitcoin Trading Bot initialized successfully")
+        logging.info(f"Data directory: {DATA_DIR}")
+        logging.info(f"Trades file: {self.trades_file}")
 
     def _initialize_trades_csv(self):
         """Initialize the trades CSV file with headers if it doesn't exist."""

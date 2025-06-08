@@ -6,15 +6,16 @@ Runs the BTC trading bot every hour automatically.
 
 import time
 import schedule
-from btc_trading_bot import BTCTradingBot
+from btc_trading_bot import BTCTradingBot, DATA_DIR
 import logging
+import os
 
-# Configure logging
+# Configure logging with persistent path
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('periodic_bot.log'),
+        logging.FileHandler(os.path.join(DATA_DIR, 'periodic_bot.log')),
         logging.StreamHandler()
     ]
 )
