@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  btc-trading-bot:
+    build: .
+    container_name: btc-trading-bot
+    restart: unless-stopped
+    volumes:
+      - ./data:/app/data
+      - ./trades.csv:/app/trades.csv
+      - ./trading_bot.log:/app/trading_bot.log
+      - ./periodic_bot.log:/app/periodic_bot.log
+    environment:
+      - TZ=UTC
+    networks:
+      - trading-network
+
+networks:
+  trading-network:
+    driver: bridge
+
+# Optional: Add monitoring service
+  # monitoring:
+  #   image: grafana/grafana:latest
+  #   container_name: trading-monitor
+  #   ports:
+  #     - "3000:3000"
+  #   volumes:
+  #     - grafana-data:/var/lib/grafana
+  #   networks:
+  #     - trading-network
+
+# volumes:
+#   grafana-data: 
