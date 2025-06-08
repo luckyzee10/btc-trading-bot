@@ -507,7 +507,7 @@ class BTCTradingBot:
             logging.info(f"SELL: ${trade_amount:.2f} worth of BTC ({btc_to_short:.6f} BTC) at ${current_price:.2f}")
             
         # Save updated state
-        self.save_state()
+        self._save_bot_state()
 
     def execute_trading_logic(self) -> Dict:
         """
