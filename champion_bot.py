@@ -101,6 +101,11 @@ class LiveMarkovBot:
         self.portfolio_history = []
         self.last_portfolio_log_time = 0
         
+        # Cooldown period to prevent over-trading
+        self.last_buy_timestamp = 0
+        self.last_sell_timestamp = 0
+        self.trade_cooldown_seconds = 3600 # 1 hour = 3600 seconds
+        
         logger.info("🔬 LIVE MARKOV BOT INITIALIZED")
         logger.info(f"📊 Strategy: Champion Backtest Markov (+74.04% backtested)")
         logger.info(f"💱 Exchange: {self.exchange_name.upper()}")
@@ -779,12 +784,36 @@ class LiveMarkovBot:
                 
                 if signal:
                     logger.info(f"📊 Signal generated: {signal} - {reason}")
-                    success = self.execute_trade(signal, market_data, reason)
                     
-                    if success:
-                        logger.info(f"✅ Trade executed successfully")
-                    else:
-                        logger.warning(f"⚠️ Trade execution failed")
+                    can_trade = False
+                    now = time.time()
+                    
+                    if signal == 'BUY':
+                        seconds_since_last_buy = now - self.last_buy_timestamp
+                        if seconds_since_last_buy >= self.trade_cooldown_seconds:
+                            can_trade = True
+                        else:
+                            remaining = self.trade_cooldown_seconds - seconds_since_last_buy
+                            logger.info(f"❄️ BUY COOLDOWN: Signal ignored. {int(remaining/60)}m remaining.")
+                            
+                    elif signal == 'SELL':
+                        seconds_since_last_sell = now - self.last_sell_timestamp
+                        if seconds_since_last_sell >= self.trade_cooldown_seconds:
+                            can_trade = True
+                        else:
+                            remaining = self.trade_cooldown_seconds - seconds_since_last_sell
+                            logger.info(f"❄️ SELL COOLDOWN: Signal ignored. {int(remaining/60)}m remaining.")
+
+                    if can_trade:
+                        success = self.execute_trade(signal, market_data, reason)
+                        if success:
+                            logger.info(f"✅ Trade executed successfully. Cooldown started for {signal}.")
+                            if signal == 'BUY':
+                                self.last_buy_timestamp = now
+                            elif signal == 'SELL':
+                                self.last_sell_timestamp = now
+                        else:
+                            logger.warning(f"⚠️ Trade execution failed")
                 
                 # Log portfolio state every 5 minutes
                 now = time.time()
