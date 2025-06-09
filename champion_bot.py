@@ -203,30 +203,45 @@ class LiveMarkovBot:
         try:
             logger.info(f"📈 Fetching {hours} hours of historical data...")
             
+            # More robust fetching logic using a while loop
+            limit = 1000
             all_candles = []
-            limit = 1000  # Most exchanges limit to 1000 candles per request
             
-            for batch in range((hours // limit) + 1):
-                since = int((datetime.now() - timedelta(hours=hours - batch * limit)).timestamp() * 1000)
-                
-                candles = self.exchange.fetch_ohlcv(
-                    self.symbol, 
-                    '1h', 
-                    since=since, 
-                    limit=min(limit, hours - batch * limit)
-                )
+            # Calculate the timestamp to start fetching from (in the past)
+            from_ts = self.exchange.milliseconds() - hours * 60 * 60 * 1000
+            
+            while from_ts < self.exchange.milliseconds():
+                logger.info(f"   Fetching chunk starting from {datetime.fromtimestamp(from_ts/1000)}")
+                candles = self.exchange.fetch_ohlcv(self.symbol, '1h', since=from_ts, limit=limit)
                 
                 if candles:
+                    # Binance can return more candles than requested.
+                    # Update the timestamp for the next fetch to avoid duplicates.
+                    from_ts = candles[-1][0] + 1 
                     all_candles.extend(candles)
-                
-                time.sleep(1)  # Rate limiting
+                else:
+                    # No more data available, break the loop
+                    break
+
+                # Safety break if we get stuck in a loop
+                if len(all_candles) > hours * 2:
+                    logger.warning("   Fetched more data than expected, breaking loop.")
+                    break
             
+            if not all_candles:
+                logger.error("   No candles were fetched.")
+                return pd.DataFrame()
+
             # Convert to DataFrame
             df = pd.DataFrame(all_candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             df.set_index('timestamp', inplace=True)
-            df = df.sort_index().drop_duplicates()
+            # drop_duplicates is important here to ensure data integrity
+            df = df.sort_index().drop_duplicates() 
             
+            # Trim to the exact number of hours requested
+            df = df.tail(hours)
+
             logger.info(f"✅ Loaded {len(df)} hours of data from {df.index[0]} to {df.index[-1]}")
             return df
             
