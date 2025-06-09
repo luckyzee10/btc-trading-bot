@@ -180,11 +180,11 @@ class BTCTradingBot:
                         self.position = state['position']
                         self.entry_price = float(state['entry_price']) if state['entry_price'] else None
                         self.last_signal_time = state['last_signal_time']
-                        self.current_balance = float(state['current_balance'])
-                        self.btc_holdings = float(state['btc_holdings'])
-                        self.trade_count = state['trade_count']
-                        self.winning_trades = state['winning_trades']
-                        self.losing_trades = state['losing_trades']
+                        self.current_balance = float(state['current_balance']) if state['current_balance'] else 100.0
+                        self.btc_holdings = float(state['btc_holdings']) if state['btc_holdings'] else 0.0
+                        self.trade_count = int(state['trade_count']) if state['trade_count'] else 0
+                        self.winning_trades = int(state['winning_trades']) if state['winning_trades'] else 0
+                        self.losing_trades = int(state['losing_trades']) if state['losing_trades'] else 0
                         logging.info(f"Loaded bot state: position={self.position}, entry_price={self.entry_price}, current_balance=${self.current_balance:,.2f}, btc_holdings={self.btc_holdings:.6f}, trade_count={self.trade_count}")
                     else:
                         logging.info("No previous bot state found - initializing with $10,000 worth of BTC")
@@ -203,7 +203,16 @@ class BTCTradingBot:
                     cur.execute("""
                         INSERT INTO bot_state (position, entry_price, last_signal_time, current_balance, btc_holdings, trade_count, winning_trades, losing_trades)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                    """, (self.position, self.entry_price, self.last_signal_time, self.current_balance, self.btc_holdings, self.trade_count, self.winning_trades, self.losing_trades))
+                    """, (
+                        str(self.position) if self.position else None,
+                        float(self.entry_price) if self.entry_price else None,
+                        self.last_signal_time,
+                        float(self.current_balance),
+                        float(self.btc_holdings),
+                        int(self.trade_count),
+                        int(self.winning_trades),
+                        int(self.losing_trades)
+                    ))
                     conn.commit()
                     
         except Exception as e:
@@ -424,18 +433,21 @@ class BTCTradingBot:
         try:
             with self._get_db_connection() as conn:
                 with conn.cursor() as cur:
+                    # Convert all values to regular Python types (avoid numpy types)
+                    portfolio_value = self.current_balance + (self.btc_holdings * price if self.position == 'long' else 0)
+                    
                     cur.execute("""
                         INSERT INTO trades (timestamp, price, signal, btc_amount, usd_amount, portfolio_value, balance, btc_holdings)
                         VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
                     """, (
                         datetime.now(),
-                        price,
-                        signal,
-                        btc_amount,
-                        usd_amount,
-                        self.current_balance + (self.btc_holdings * price if self.position == 'long' else 0),
-                        self.current_balance,
-                        self.btc_holdings
+                        float(price),
+                        str(signal),
+                        float(btc_amount),
+                        float(usd_amount),
+                        float(portfolio_value),
+                        float(self.current_balance),
+                        float(self.btc_holdings)
                     ))
                     conn.commit()
         except Exception as e:
