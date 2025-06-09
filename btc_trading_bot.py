@@ -161,10 +161,21 @@ class BTCTradingBot:
         self.transition_matrix = load_matrix()
         logging.info("Markov transition matrix loaded")
         
+        # Weekly Matrix Rebuilding Settings - NEW!
+        self.enable_weekly_rebuild = True  # Flag to enable/disable weekly rebuilds
+        self.rebuild_frequency_hours = 336  # 14 days - OPTIMIZED from comparison study
+        self.matrix_training_window = 1500  # Use 1500 hours for matrix training - OPTIMIZED
+        self.last_matrix_rebuild_time = None  # Track when matrix was last rebuilt
+        self.matrix_rebuild_count = 0  # Count how many times matrix was rebuilt
+        
         # Ensure we have historical data for matrix (back-fill if needed)
         self.ensure_transition_matrix()
         
         logging.info("Bitcoin Trading Bot initialized successfully with PostgreSQL and Markov Chain")
+        logging.info(f"Adaptive matrix rebuilding: {'ENABLED' if self.enable_weekly_rebuild else 'DISABLED'}")
+        if self.enable_weekly_rebuild:
+            logging.info(f"Matrix will rebuild every {self.rebuild_frequency_hours} hours ({self.rebuild_frequency_hours//24} days) - OPTIMIZED")
+            logging.info(f"Training window: {self.matrix_training_window} hours ({self.matrix_training_window//24:.1f} days) - OPTIMIZED")
 
     def _get_db_connection(self):
         """Get database connection."""
@@ -687,16 +698,28 @@ class BTCTradingBot:
 
     def execute_trading_logic(self) -> Dict:
         """
-        Execute the main trading logic.
+        Execute the main trading logic:
+        1. Fetch current market data
+        2. Calculate indicators  
+        3. Generate signals
+        4. Execute trades
+        5. Update portfolio state
         
         Returns:
-            Dictionary with analysis results
+            Dictionary with execution results
         """
         try:
-            logging.info("Starting trading analysis...")
+            # NEW: Check and rebuild matrix if needed (weekly adjustment)
+            matrix_rebuilt = self.check_and_rebuild_matrix()
+            if matrix_rebuilt:
+                logging.info("✅ Transition matrix successfully updated with recent market data")
             
             # Fetch market data
             df = self.fetch_ohlcv_data()
+            
+            if df is None or len(df) == 0:
+                logging.warning("No market data available")
+                return {'error': 'No market data'}
             
             # Calculate indicators
             df = self.calculate_indicators(df)
@@ -726,11 +749,15 @@ class BTCTradingBot:
                 'entry_price': self.entry_price,
                 'indicators': indicators,
                 'candles_analyzed': len(df),
-                'trading_stats': stats
+                'trading_stats': stats,
+                'matrix_rebuilt': matrix_rebuilt,  # NEW: Include matrix rebuild status
+                'matrix_rebuild_count': self.matrix_rebuild_count  # NEW: Include rebuild count
             }
             
             # Log current status
             status_msg = f"Analysis complete - Price: {current_price:.2f}, Signal: {signal or 'HOLD'}, Position: {self.position or 'None'}"
+            if matrix_rebuilt:
+                status_msg += f" [Matrix Rebuilt #{self.matrix_rebuild_count}]"
             logging.info(status_msg)
             
             return result
@@ -829,6 +856,18 @@ class BTCTradingBot:
         print(f"Predicted Next: {indicators.get('markov_next_state', 'N/A')}")
         print(f"Confidence: {indicators.get('markov_probability', 0)*100:.1f}%")
         
+        # NEW: Display matrix rebuild information
+        if result.get('matrix_rebuilt', False):
+            print(f"\n🔄 === Matrix Rebuild Alert ===")
+            print(f"Matrix was rebuilt this cycle (Rebuild #{result.get('matrix_rebuild_count', 0)})")
+            print(f"Bot adapted to recent market changes!")
+        elif self.matrix_rebuild_count > 0:
+            print(f"\n🔄 === Adaptive Learning Status ===")
+            print(f"Total Matrix Rebuilds: {self.matrix_rebuild_count}")
+            if self.last_matrix_rebuild_time:
+                next_rebuild = self.last_matrix_rebuild_time + timedelta(hours=self.rebuild_frequency_hours)
+                print(f"Next Rebuild: {next_rebuild.strftime('%Y-%m-%d %H:%M')} UTC")
+        
         logging.info(f"Analysis complete. Portfolio value: ${stats.get('current_portfolio_value', 0):,.2f}, Return: {stats.get('total_return_pct', 0):+.2f}%")
 
     def ensure_transition_matrix(self):
@@ -885,6 +924,93 @@ class BTCTradingBot:
         except Exception as e:
             logging.error(f"Error ensuring transition matrix: {e}")
             # Continue with uniform distribution if matrix building fails
+
+    def check_and_rebuild_matrix(self):
+        """Check if matrix needs rebuilding and rebuild if necessary - NEW WEEKLY ADJUSTMENT!"""
+        if not self.enable_weekly_rebuild:
+            return False
+        
+        try:
+            current_time = datetime.now()
+            
+            # Check if it's time to rebuild
+            if (self.last_matrix_rebuild_time is None or 
+                (current_time - self.last_matrix_rebuild_time).total_seconds() >= self.rebuild_frequency_hours * 3600):
+                
+                logging.info("Time for weekly matrix rebuild...")
+                
+                # Get historical data from database for matrix rebuilding
+                with self._get_db_connection() as conn:
+                    with conn.cursor(cursor_factory=RealDictCursor) as cur:
+                        # Get most recent matrix_training_window hours of data
+                        cur.execute("""
+                            SELECT timestamp, close_price, rsi
+                            FROM market_data 
+                            WHERE rsi IS NOT NULL 
+                            ORDER BY timestamp DESC 
+                            LIMIT %s
+                        """, (self.matrix_training_window,))
+                        
+                        rows = cur.fetchall()
+                
+                if len(rows) < 100:
+                    logging.warning(f"Insufficient database data for matrix rebuild ({len(rows)} rows), skipping...")
+                    return False
+                
+                # Convert to DataFrame (reverse to chronological order)
+                df = pd.DataFrame(rows[::-1])
+                df['timestamp'] = pd.to_datetime(df['timestamp'])
+                df.set_index('timestamp', inplace=True)
+                
+                # Rename column to match expected structure
+                df['close'] = df['close_price']
+                
+                # Calculate price change percentage
+                df['pct_change'] = df['close'].pct_change() * 100
+                
+                # Label states
+                df['markov_state'] = df.apply(
+                    lambda row: label_state(row['pct_change'], row['rsi']) 
+                    if not pd.isna(row['pct_change']) and not pd.isna(row['rsi']) 
+                    else None, 
+                    axis=1
+                )
+                
+                # Remove NaN rows
+                df_clean = df.dropna(subset=['markov_state'])
+                
+                if len(df_clean) < 100:
+                    logging.warning(f"Insufficient clean data for matrix rebuild ({len(df_clean)} samples), skipping...")
+                    return False
+                
+                # Build new transition matrix
+                new_matrix = build_transition_matrix(df_clean)
+                
+                # Update tracking
+                self.matrix_rebuild_count += 1
+                self.last_matrix_rebuild_time = current_time
+                
+                # Save new matrix
+                save_matrix(new_matrix)
+                self.transition_matrix = new_matrix
+                
+                # Log the rebuild
+                logging.info(f"Matrix Rebuild #{self.matrix_rebuild_count} completed successfully")
+                logging.info(f"Training data: {len(df_clean)} samples from {df.index[0]} to {df.index[-1]}")
+                logging.info(f"Next rebuild scheduled for: {current_time + timedelta(hours=self.rebuild_frequency_hours)}")
+                
+                # Save rebuild history for inspection
+                rebuild_filename = f'transition_matrix_rebuild_{self.matrix_rebuild_count}_{current_time.strftime("%Y%m%d_%H%M")}.pkl'
+                with open(rebuild_filename, 'wb') as f:
+                    pickle.dump(new_matrix, f)
+                
+                return True
+                
+        except Exception as e:
+            logging.error(f"Error in matrix rebuild: {e}")
+            return False
+        
+        return False
 
 
 def main():

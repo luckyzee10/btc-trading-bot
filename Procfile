@@ -1,1 +1,1 @@
-worker: python run_bot_hourly.py 
+web: python champion_bot.py 
