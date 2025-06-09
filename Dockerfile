@@ -22,7 +22,7 @@ ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
 # Make scripts executable
-RUN chmod +x btc_trading_bot.py run_bot_hourly.py
+RUN chmod +x champion_bot.py
 
-# Default command runs the hourly scheduler
-CMD ["python", "run_bot_hourly.py"] 
+# Use Procfile for process management
+CMD ["gunicorn", "dashboard:app", "--log-file", "-"] 
