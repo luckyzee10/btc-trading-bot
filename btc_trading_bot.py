@@ -4,6 +4,7 @@ Bitcoin Trading Bot
 A paper trading bot that analyzes BTC/USDT on Binance using technical indicators
 and generates buy/sell signals based on predefined conditions.
 Uses PostgreSQL for data persistence.
+Enhanced with Markov Chain state modeling and prediction.
 """
 
 import ccxt
@@ -18,6 +19,90 @@ import psycopg2
 from psycopg2.extras import RealDictCursor
 import json
 from typing import Dict, List, Optional, Tuple
+import pickle
+from collections import defaultdict
+
+# === MARKOV CHAIN HELPERS =======================================
+STATE_MATRIX_FILE = 'transition_matrix.pkl'
+MARKOV_STATES = [
+    f'{p}-{r}'
+    for p in ('UP', 'FLAT', 'DOWN')
+    for r in ('OVERSOLD', 'NEUTRAL', 'OVERBOUGHT')
+]
+
+# Markov trading configuration
+MARKOV_CONFIDENCE_THRESHOLD = 0.70
+BULLISH_STATES = {'UP-NEUTRAL', 'UP-OVERBOUGHT', 'FLAT-NEUTRAL'}
+BEARISH_STATES = {'DOWN-NEUTRAL', 'DOWN-OVERSOLD', 'FLAT-OVERBOUGHT'}
+
+def label_state(pct_change: float, rsi: float) -> str:
+    """Return combined state label (price movement + RSI zone)."""
+    if pct_change > 1:
+        price_state = 'UP'
+    elif pct_change < -1:
+        price_state = 'DOWN'
+    else:
+        price_state = 'FLAT'
+
+    if rsi < 30:
+        rsi_state = 'OVERSOLD'
+    elif rsi > 70:
+        rsi_state = 'OVERBOUGHT'
+    else:
+        rsi_state = 'NEUTRAL'
+
+    return f'{price_state}-{rsi_state}'
+
+def build_transition_matrix(df: pd.DataFrame) -> dict:
+    """Return {state:{next_state:prob}} from labeled DataFrame."""
+    counts = defaultdict(lambda: defaultdict(int))
+    for cur, nxt in zip(df['markov_state'][:-1], df['markov_state'][1:]):
+        counts[cur][nxt] += 1
+
+    matrix = {s: {} for s in MARKOV_STATES}
+    for s, nxts in counts.items():
+        total = sum(nxts.values())
+        if total > 0:
+            for nxt, c in nxts.items():
+                matrix[s][nxt] = c / total
+        else:
+            # If no transitions from this state, use uniform distribution
+            for nxt in MARKOV_STATES:
+                matrix[s][nxt] = 1 / len(MARKOV_STATES)
+    
+    # Fill missing states with uniform distribution
+    for s in MARKOV_STATES:
+        if not matrix[s]:
+            matrix[s] = {n: 1/len(MARKOV_STATES) for n in MARKOV_STATES}
+    
+    return matrix
+
+def save_matrix(matrix: dict, path: str = STATE_MATRIX_FILE):
+    """Save transition matrix to pickle file."""
+    with open(path, 'wb') as f:
+        pickle.dump(matrix, f)
+
+def load_matrix(path: str = STATE_MATRIX_FILE) -> dict:
+    """Load transition matrix from pickle file."""
+    try:
+        with open(path, 'rb') as f:
+            return pickle.load(f)
+    except FileNotFoundError:
+        # Return uniform probabilities until we have real data
+        return {s: {n: 1/len(MARKOV_STATES) for n in MARKOV_STATES} for s in MARKOV_STATES}
+
+def predict_next_state(current_state: str, transition_matrix: dict) -> Tuple[str, float]:
+    """Predict most probable next state and its probability."""
+    probs = transition_matrix.get(current_state, {})
+    if probs:
+        next_state = max(probs, key=probs.get)
+        prob_val = probs[next_state]
+        return next_state, prob_val
+    else:
+        # Fallback to most common state
+        return 'FLAT-NEUTRAL', 0.33
+
+# === END MARKOV HELPERS =======================================
 
 # Configure logging
 logging.basicConfig(
@@ -54,15 +139,14 @@ class BTCTradingBot:
         self.entry_price = None
         self.last_signal_time = None
         
-        # Portfolio simulation - Start with $10K worth of BTC instead of USD
-        self.starting_balance = 10000.0  # Track $10,000 equivalent for performance
+        # Portfolio simulation - Start with exact BTC amount
+        self.starting_btc_amount = 0.07983511  # Exact BTC starting amount
         self.current_balance = 100.0  # Small USD balance for trading fees/flexibility
-        self.btc_holdings = 0.0  # Will be calculated based on current BTC price
+        self.btc_holdings = 0.0  # Will be set to starting_btc_amount on initialization
         self.position_size_pct = 0.95  # Use 95% of balance for each trade
         self.trade_count = 0
         self.winning_trades = 0
         self.losing_trades = 0
-        self.initial_btc_value = 10000.0  # Track initial BTC value in USD
         
         # Database connection
         self.db_url = os.getenv('DATABASE_URL')
@@ -73,7 +157,14 @@ class BTCTradingBot:
         # Initialize database
         self._initialize_database()
         
-        logging.info("Bitcoin Trading Bot initialized successfully with PostgreSQL")
+        # Markov Chain setup
+        self.transition_matrix = load_matrix()
+        logging.info("Markov transition matrix loaded")
+        
+        # Ensure we have historical data for matrix (back-fill if needed)
+        self.ensure_transition_matrix()
+        
+        logging.info("Bitcoin Trading Bot initialized successfully with PostgreSQL and Markov Chain")
 
     def _get_db_connection(self):
         """Get database connection."""
@@ -151,12 +242,12 @@ class BTCTradingBot:
             current_price = self.get_current_price()
             if current_price > 0:
                 # Calculate BTC amount for $10,000
-                initial_btc_amount = self.initial_btc_value / current_price
+                initial_btc_amount = self.starting_btc_amount
                 self.btc_holdings = initial_btc_amount
                 self.position = 'long'  # Start with a long position in BTC
                 self.entry_price = current_price
                 
-                logging.info(f"Initialized with {initial_btc_amount:.6f} BTC (${self.initial_btc_value:,.2f} worth) at ${current_price:,.2f}")
+                logging.info(f"Initialized with {initial_btc_amount:.6f} BTC at ${current_price:,.2f}")
                 
                 # Save initial state
                 self._save_bot_state()
@@ -187,7 +278,7 @@ class BTCTradingBot:
                         self.losing_trades = int(state['losing_trades']) if state['losing_trades'] else 0
                         logging.info(f"Loaded bot state: position={self.position}, entry_price={self.entry_price}, current_balance=${self.current_balance:,.2f}, btc_holdings={self.btc_holdings:.6f}, trade_count={self.trade_count}")
                     else:
-                        logging.info("No previous bot state found - initializing with $10,000 worth of BTC")
+                        logging.info("No previous bot state found - initializing with exact BTC amount")
                         # Initialize with BTC holdings instead of USD
                         if not self._initialize_btc_holdings():
                             logging.error("Failed to initialize BTC holdings")
@@ -359,7 +450,7 @@ class BTCTradingBot:
 
     def generate_signals(self, df: pd.DataFrame) -> Tuple[Optional[str], str, Dict]:
         """
-        Generate trading signals based on technical indicators.
+        Generate trading signals based on technical indicators and Markov prediction.
         
         Args:
             df: DataFrame with OHLCV data and indicators
@@ -384,13 +475,13 @@ class BTCTradingBot:
             }
             
             # Check for NaN values
-            if any(pd.isna(value) for value in indicators.values()):
+            if any(pd.isna(value) for value in indicators.values() if value is not None):
                 return None, "Insufficient data - indicators contain NaN values", indicators
             
             signal = None
             reason = ""
             
-            # BUY conditions:
+            # BUY conditions (original logic maintained):
             # - RSI < 30
             # - Price is below lower Bollinger Band
             # - ATR is above its recent average
@@ -403,7 +494,7 @@ class BTCTradingBot:
                 signal = 'BUY'
                 reason = f"RSI oversold ({indicators['rsi']:.2f}), price below BB lower ({current_price:.2f} < {indicators['bb_lower']:.2f}), high volatility (ATR {indicators['atr']:.2f} > {indicators['atr_ma']:.2f}), above EMA200"
             
-            # SELL conditions:
+            # SELL conditions (original logic maintained):
             # - RSI > 50 OR price crosses back above mid Bollinger Band
             elif (indicators['rsi'] > 50 or current_price > indicators['bb_middle']):
                 if self.position == 'long':  # Only sell if we have a position
@@ -412,6 +503,46 @@ class BTCTradingBot:
                         reason = f"RSI overbought ({indicators['rsi']:.2f})"
                     else:
                         reason = f"Price above BB middle ({current_price:.2f} > {indicators['bb_middle']:.2f})"
+            
+            # === MARKOV PREDICTION & GATING LOGIC ===
+            if len(df) >= 2:
+                # Calculate current state
+                prev_price = df['close'].iloc[-2]
+                current_pct_change = ((current_price - prev_price) / prev_price) * 100
+                current_rsi = indicators['rsi']
+                current_state = label_state(current_pct_change, current_rsi)
+                
+                # Get prediction using helper function
+                next_state, probability = predict_next_state(current_state, self.transition_matrix)
+                
+                # Log Markov prediction for observation
+                logging.info(f"[MARKOV] Current State: {current_state} → Predicted Next: {next_state} ({probability:.2%})")
+                
+                # Add to indicators for tracking
+                indicators['markov_current_state'] = current_state
+                indicators['markov_next_state'] = next_state
+                indicators['markov_probability'] = probability
+                
+                # MARKOV GATING LOGIC
+                # 1. If no existing signal, consider Markov-based BUY
+                if (signal is None and 
+                    next_state in BULLISH_STATES and 
+                    probability >= MARKOV_CONFIDENCE_THRESHOLD and 
+                    self.position != 'long'):
+                    
+                    signal = 'BUY'
+                    reason = f"Markov: {current_state}→{next_state} ({probability:.0%})"
+                    logging.info(f"[MARKOV TRADE] BUY triggered by {current_state}→{next_state} ({probability:.2%})")
+                
+                # 2. If currently long, consider Markov-based SELL
+                elif (self.position == 'long' and 
+                      next_state in BEARISH_STATES and 
+                      probability >= MARKOV_CONFIDENCE_THRESHOLD):
+                    
+                    signal = 'SELL'
+                    reason = f"Markov exit: {current_state}→{next_state} ({probability:.0%})"
+                    logging.info(f"[MARKOV TRADE] SELL triggered by {current_state}→{next_state} ({probability:.2%})")
+            # === END MARKOV LOGIC ===
             
             return signal, reason, indicators
             
@@ -468,18 +599,22 @@ class BTCTradingBot:
                 unrealized_pnl = (self.entry_price - current_price) * self.btc_holdings
                 current_portfolio_value += unrealized_pnl + (self.btc_holdings * self.entry_price)
             
-            # Calculate performance metrics (compared to initial $10K BTC value)
-            total_return = ((current_portfolio_value - self.starting_balance) / self.starting_balance) * 100
+            # Calculate initial portfolio value (starting BTC amount * current price)
+            initial_portfolio_value = self.starting_btc_amount * current_price
+            
+            # Calculate performance metrics (compared to holding initial BTC)
+            total_return = ((current_portfolio_value - initial_portfolio_value) / initial_portfolio_value) * 100
             win_rate = (self.winning_trades / self.trade_count * 100) if self.trade_count > 0 else 0
             
             return {
-                'starting_balance': self.starting_balance,
+                'starting_btc_amount': self.starting_btc_amount,
+                'initial_portfolio_value': initial_portfolio_value,
                 'current_balance': self.current_balance,
                 'btc_holdings': self.btc_holdings,
                 'current_portfolio_value': current_portfolio_value,
                 'current_btc_price': current_price,
                 'total_return_pct': total_return,
-                'total_pnl': current_portfolio_value - self.starting_balance,
+                'total_pnl': current_portfolio_value - initial_portfolio_value,
                 'trade_count': self.trade_count,
                 'winning_trades': self.winning_trades,
                 'losing_trades': self.losing_trades,
@@ -664,7 +799,8 @@ class BTCTradingBot:
         print(f"Reason: {result.get('reason', 'N/A')}")
         
         print(f"\n=== Portfolio Performance ===")
-        print(f"Started with: ${self.initial_btc_value:,.2f} worth of BTC")
+        print(f"Started with: {self.starting_btc_amount:.6f} BTC")
+        print(f"Initial Value: ${stats.get('initial_portfolio_value', 0):,.2f}")
         print(f"Current Balance: ${stats.get('current_balance', 0):,.2f}")
         print(f"BTC Holdings: {stats.get('btc_holdings', 0):.6f} BTC")
         print(f"Current BTC Price: ${stats.get('current_btc_price', 0):,.2f}")
@@ -688,7 +824,67 @@ class BTCTradingBot:
         print(f"Bollinger Bands: ${indicators.get('bb_lower', 'N/A')} - ${indicators.get('bb_upper', 'N/A')}")
         print(f"ATR (14): {indicators.get('atr', 'N/A')}")
         
+        print(f"\n=== Markov Chain Prediction ===")
+        print(f"Current State: {indicators.get('markov_current_state', 'N/A')}")
+        print(f"Predicted Next: {indicators.get('markov_next_state', 'N/A')}")
+        print(f"Confidence: {indicators.get('markov_probability', 0)*100:.1f}%")
+        
         logging.info(f"Analysis complete. Portfolio value: ${stats.get('current_portfolio_value', 0):,.2f}, Return: {stats.get('total_return_pct', 0):+.2f}%")
+
+    def ensure_transition_matrix(self):
+        """Ensure we have historical data for transition matrix (back-fill if needed)"""
+        try:
+            if os.path.exists(STATE_MATRIX_FILE):
+                logging.info("Transition matrix file already exists")
+                return
+            
+            logging.info("Building initial Markov matrix from historical data...")
+            
+            # Fetch extended historical data for better matrix
+            candles = self.exchange.fetch_ohlcv(self.symbol, self.timeframe, limit=1000)
+            
+            # Convert to DataFrame
+            df = pd.DataFrame(candles, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            df.set_index('timestamp', inplace=True)
+            
+            # Calculate RSI
+            df['rsi'] = ta.momentum.RSIIndicator(df['close'], window=self.rsi_period).rsi()
+            
+            # Calculate price change percentage
+            df['pct_change'] = df['close'].pct_change() * 100
+            
+            # Label states
+            df['markov_state'] = df.apply(
+                lambda row: label_state(row['pct_change'], row['rsi']) 
+                if not pd.isna(row['pct_change']) and not pd.isna(row['rsi']) 
+                else None, 
+                axis=1
+            )
+            
+            # Remove NaN rows
+            df_clean = df.dropna(subset=['markov_state'])
+            
+            if len(df_clean) < 100:
+                logging.warning("Insufficient clean data for matrix building, using uniform distribution")
+                return
+            
+            # Build transition matrix
+            matrix = build_transition_matrix(df_clean)
+            
+            # Save matrix
+            save_matrix(matrix)
+            self.transition_matrix = matrix
+            
+            logging.info(f"Transition matrix built from {len(df_clean)} data points and saved to {STATE_MATRIX_FILE}")
+            
+            # Log some matrix stats for verification
+            total_states = len([s for s in matrix.keys() if any(matrix[s].values())])
+            logging.info(f"Matrix contains {total_states} states with transition data")
+            
+        except Exception as e:
+            logging.error(f"Error ensuring transition matrix: {e}")
+            # Continue with uniform distribution if matrix building fails
 
 
 def main():
