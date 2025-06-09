@@ -1,1 +1,1 @@
-web: python champion_bot.py 
+worker: python champion_bot.py 
