@@ -1,11 +1,13 @@
 {
   "$schema": "https://railway.app/railway.schema.json",
   "build": {
-    "builder": "NIXPACKS"
+    "builder": "BUILDPACKS",
+    "buildCommand": "pip install -r requirements.txt"
   },
   "deploy": {
-    "numReplicas": 1,
+    "startCommand": "gunicorn dashboard:app --log-file -",
     "restartPolicyType": "ON_FAILURE",
-    "restartPolicyMaxRetries": 10
+    "restartPolicyMaxRetries": 10,
+    "numReplicas": 1
   }
 } 
