@@ -69,6 +69,7 @@ class LiveMarkovBot:
         self.exchange_name = os.getenv('EXCHANGE_NAME', 'binance')
         self.symbol = os.getenv('TRADING_SYMBOL', 'BTC/USDT')
         self.webhook_url = os.getenv('DISCORD_WEBHOOK_URL')  # For notifications
+        self.proxy_url = os.getenv('PROXY_URL')  # NEW: For bypassing geo-restrictions
         
         # Champion Strategy Configuration
         self.position_size_pct = 0.25  # 25% position sizing
@@ -118,13 +119,21 @@ class LiveMarkovBot:
         """Initialize exchange connection with error handling."""
         try:
             exchange_class = getattr(ccxt, self.exchange_name)
-            self.exchange = exchange_class({
+            
+            # NEW: Add proxy configuration if provided
+            config = {
                 'apiKey': self.api_key,
                 'secret': self.api_secret,
                 'sandbox': os.getenv('SANDBOX_MODE', 'false').lower() == 'true',
                 'enableRateLimit': True,
-                'options': {'defaultType': 'spot'}  # Spot trading only
-            })
+                'options': {'defaultType': 'spot'}
+            }
+            if self.proxy_url:
+                config['https_proxy'] = self.proxy_url
+                config['http_proxy'] = self.proxy_url
+                logger.info(f"🌐 Using proxy for API requests")
+
+            self.exchange = exchange_class(config)
             
             # Test connection
             balance = self.exchange.fetch_balance()
@@ -193,7 +202,9 @@ class LiveMarkovBot:
                 "footer": {"text": "Champion Strategy Live"}
             }
             
-            requests.post(self.webhook_url, json={"embeds": [embed]})
+            # NEW: Use proxy for notification requests too, if configured
+            proxies = {'https': self.proxy_url, 'http': self.proxy_url} if self.proxy_url else None
+            requests.post(self.webhook_url, json={"embeds": [embed]}, proxies=proxies)
             
         except Exception as e:
             logger.error(f"Failed to send notification: {e}")
