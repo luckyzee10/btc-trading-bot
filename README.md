@@ -1,167 +1,80 @@
-# Bitcoin Trading Bot
+# 🏆 Champion Trading Bot - Live BTC/USDT Trader
 
-A Python-based paper trading bot that analyzes BTC/USDT price movements on Binance using technical indicators and generates buy/sell signals. This bot is designed for educational purposes and paper trading only - no real orders are placed.
+This repository contains the code for a fully-automated, live trading bot for the BTC/USDT pair on Binance.US. The bot implements the "Champion Strategy," which was the winning strategy selected from a comprehensive 1-year backtest comparing four different algorithmic approaches.
 
-## Features
+The bot is designed for production deployment on a cloud platform like Railway and includes features for real-time execution, market adaptation, risk management, and monitoring.
 
-- **Real-time Data**: Fetches live BTC/USDT 1-hour candles from Binance
-- **Technical Analysis**: Implements multiple indicators:
-  - RSI (Relative Strength Index) - 14 period
-  - Bollinger Bands - 20 period, 2 standard deviations
-  - EMA (Exponential Moving Average) - 200 period
-  - ATR (Average True Range) - 14 period
-- **Smart Signals**: Generates buy/sell signals based on confluence of indicators
-- **Trade Logging**: Logs all trades to CSV with timestamps, prices, and reasons
-- **Paper Trading**: Tracks positions and P&L without real money
-- **Periodic Execution**: Can run automatically every hour
+## 🥇 The Champion Strategy
 
-## Trading Strategy
+The core logic is based on a weekly-rebuilt Markov Chain model combined with key technical indicators. This strategy proved to be the most profitable and robust during a 1-year backtest period (Oct 2024 - Jun 2025).
 
-### Buy Signals
-A BUY signal is generated when ALL of the following conditions are met:
-- RSI < 30 (oversold condition)
-- Price is below the lower Bollinger Band
-- ATR is above its recent average (increased volatility)
-- Price is above the 200-period EMA (uptrend confirmation)
+### Backtest Performance Highlights
+- **Total Return:** `+74.04%`
+- **Alpha vs. Buy & Hold:** `+12.35%`
+- **Annualized Return:** `+131.5%`
+- **Win Rate:** `78.5%` over 3,004 trades
+- **Sharpe Ratio:** `2.11`
 
-### Sell Signals
-A SELL signal is generated when ANY of the following conditions are met:
-- RSI > 50 (momentum weakening)
-- Price crosses back above the middle Bollinger Band
+### Core Strategy Parameters
+- **Position Sizing:** 25% of available capital per trade.
+- **Stop Loss:** 8% below entry price for all long positions.
+- **Market Adaptation:** The core transition matrix is rebuilt every 168 hours (1 week) using the last 1000 hours of market data, allowing the bot to continuously adapt to changing market conditions.
+- **Trading Signals:** A combination of Markov state prediction (with a >70% confidence threshold) and technical indicators (RSI, Bollinger Bands, 200-period EMA, ATR) generates buy/sell signals.
 
-## Installation
+---
 
-1. **Clone or download the files**
+## 🚀 Deployment & Configuration
 
-2. **Create a virtual environment** (recommended):
-   ```bash
-   python3 -m venv venv
-   source venv/bin/activate  # On Windows: venv\Scripts\activate
-   ```
+This bot is designed to be deployed as a `worker` service on a platform like Railway.
 
-3. **Install Python dependencies**:
-   ```bash
-   pip install -r requirements.txt
-   ```
+### 1. Prerequisites
+- A `Binance.US` account.
+- Python 3.10+
+- The required packages are listed in `requirements.txt`.
 
-## Usage
+### 2. Environment Variables
+You must configure the following environment variables in your deployment environment (e.g., in the Railway "Variables" tab):
 
-**Important**: Always activate the virtual environment first:
-```bash
-source venv/bin/activate  # On Windows: venv\Scripts\activate
-```
+| Variable              | Description                                                                                             | Example                        |
+|-----------------------|---------------------------------------------------------------------------------------------------------|--------------------------------|
+| `EXCHANGE_API_KEY`    | Your Binance.US API Key.                                                                                | `abc...`                       |
+| `EXCHANGE_API_SECRET` | Your Binance.US API Secret.                                                                             | `xyz...`                       |
+| `EXCHANGE_NAME`       | The exchange to use. Must be set to `binanceus`.                                                        | `binanceus`                    |
+| `TRADING_SYMBOL`      | The trading pair. Defaults to `BTC/USDT`.                                                               | `BTC/USDT`                     |
+| `DISCORD_WEBHOOK_URL` | (Optional) A Discord webhook URL for receiving real-time trade notifications and alerts.                | `https://discord.com/api/webhooks/...` |
+| `SANDBOX_MODE`        | (Optional) Set to `true` to run in sandbox mode (if supported by exchange). Defaults to `false`.        | `false`                        |
 
-### Single Analysis Run
-To run the bot once and see the current market analysis:
-```bash
-python btc_trading_bot.py
-```
+#### API Key Permissions
+When creating your `Binance.US` API key, ensure the following permissions are set:
+- **IP Access:** "Unrestricted" (Required for dynamic cloud platforms).
+- **Permissions:**
+    - ✅ Enable Spot & Margin Trading
+    - ❌ Enable Withdrawals (For security, this should be disabled).
 
-### Continuous Hourly Analysis
-To run the bot automatically every hour:
-```bash
-python run_bot_hourly.py
-```
+### 3. Railway Setup
+1.  Fork this repository to your own GitHub account.
+2.  Create a new project on Railway and link it to your forked repository.
+3.  In the project settings, go to the "Variables" tab and add the environment variables listed above.
+4.  The `railway.json` and `Procfile` in this repository will automatically configure the bot to run as a `worker` process. A new deployment will be triggered automatically on every `git push`.
 
-## Files Generated
+---
 
-- **`trades.csv`**: All buy/sell signals with timestamps, prices, and technical indicator values
-- **`trading_bot.log`**: Detailed bot execution logs
-- **`periodic_bot.log`**: Logs from the hourly scheduler (if using periodic mode)
+## ⚙️ Bot Operation & Monitoring
 
-## Sample Output
+### Logging
+The bot produces detailed logs to a file (`champion_bot.log`) and to `stdout` (which will appear in Railway's log viewer). The logs provide real-time insight into:
+- Portfolio state
+- Signal generation logic
+- Trade executions
+- Stop-loss checks
+- Weekly matrix rebuilds
 
-```
-============================================================
-BITCOIN TRADING BOT - STATUS REPORT
-============================================================
-Timestamp: 2024-01-15 14:00:00+00:00
-Current Price: $42,350.75
-Signal: BUY
-Position: long
-Entry Price: $42,350.75
+### Discord Notifications
+If the `DISCORD_WEBHOOK_URL` is configured, the bot will send real-time alerts for:
+- Bot startup and shutdown events.
+- Successful BUY and SELL trades.
+- Stop-loss executions.
+- Critical errors.
 
-TECHNICAL INDICATORS:
-RSI (14): 28.45
-Bollinger Bands: Upper $43,200.50 | Middle $42,100.25 | Lower $40,999.75
-EMA (200): $41,800.30
-ATR (14): 1250.45
-
-Reason: RSI oversold (28.45), price below BB lower (42350.75 < 40999.75), high volatility (ATR 1250.45 > 1180.20), above EMA200
-
-Candles Analyzed: 500
-============================================================
-```
-
-## CSV Output Format
-
-The `trades.csv` file contains the following columns:
-- `timestamp`: When the signal was generated
-- `price`: BTC price at signal time
-- `signal`: BUY or SELL
-- `reason`: Detailed explanation of why the signal was generated
-- `rsi`: RSI value at signal time
-- `bb_upper`: Upper Bollinger Band value
-- `bb_middle`: Middle Bollinger Band value
-- `bb_lower`: Lower Bollinger Band value
-- `ema_200`: EMA 200 value
-- `atr`: ATR value
-
-## Customization
-
-You can modify the trading parameters in the `BTCTradingBot` class:
-
-```python
-# Technical indicator parameters
-self.rsi_period = 14        # RSI lookback period
-self.bb_period = 20         # Bollinger Bands period
-self.bb_std = 2             # Bollinger Bands standard deviation
-self.ema_period = 200       # EMA period
-self.atr_period = 14        # ATR period
-```
-
-## Automation Options
-
-### Option 1: Manual Execution
-Run the bot manually whenever you want to check the market:
-```bash
-python btc_trading_bot.py
-```
-
-### Option 2: Periodic Scheduler
-Use the built-in scheduler to run every hour:
-```bash
-python run_bot_hourly.py
-```
-
-### Option 3: Cron Job (Linux/macOS)
-Add to your crontab to run every hour:
-```bash
-0 * * * * cd /path/to/your/bot && source venv/bin/activate && python btc_trading_bot.py
-```
-
-## Important Notes
-
-⚠️ **This is a paper trading bot for educational purposes only**
-- No real trades are executed
-- No API keys or real money are required
-- This is not financial advice
-- Always do your own research before making investment decisions
-
-## Requirements
-
-- Python 3.7+
-- Internet connection (for fetching market data from Binance)
-- All dependencies listed in `requirements.txt`
-
-## Troubleshooting
-
-1. **"Command not found: pip"**: Use `pip3` instead of `pip`, or ensure Python is properly installed
-2. **"externally-managed-environment"**: Use a virtual environment (see installation instructions above)
-3. **Connection Issues**: Ensure you have a stable internet connection
-4. **Missing Dependencies**: Make sure you've activated the virtual environment and run `pip install -r requirements.txt`
-5. **Permission Errors**: Make sure the bot can write to the current directory for logs and CSV files
-
-## License
-
-This project is for educational purposes. Use at your own risk. 
+### Emergency Shutdown
+The bot can be stopped gracefully by sending a `SIGINT` or `SIGTERM` signal (e.g., by stopping the deployment in Railway, or using `Ctrl+C` if running locally). This will trigger an emergency shutdown handler. 
