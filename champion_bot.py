@@ -34,6 +34,7 @@ import threading
 import signal
 import requests
 from typing import Dict, List, Tuple, Optional
+import csv
 
 # Configure logging
 logging.basicConfig(
@@ -48,6 +49,8 @@ logger = logging.getLogger(__name__)
 
 # === MARKOV CHAIN CONFIGURATION ===
 STATE_MATRIX_FILE = 'live_transition_matrix.pkl'
+TRADES_LOG_FILE = 'trades.csv'
+PORTFOLIO_LOG_FILE = 'portfolio_log.csv'
 MARKOV_STATES = [
     f'{p}-{r}'
     for p in ('UP', 'FLAT', 'DOWN')
@@ -90,12 +93,13 @@ class LiveMarkovBot:
         self.active_positions = []
         self.transition_matrix = {}
         
-        # Performance tracking
+        # Performance tracking & logging
         self.trades_today = 0
         self.total_trades = 0
         self.winning_trades = 0
         self.losing_trades = 0
         self.portfolio_history = []
+        self.last_portfolio_log_time = 0
         
         logger.info("🔬 LIVE MARKOV BOT INITIALIZED")
         logger.info(f"📊 Strategy: Champion Backtest Markov (+74.04% backtested)")
@@ -106,6 +110,9 @@ class LiveMarkovBot:
         
         # Initialize exchange
         self.setup_exchange()
+        
+        # Setup persistent logging
+        self.setup_csv_logs()
         
         # Load or build initial matrix
         self.initialize_transition_matrix()
@@ -138,8 +145,29 @@ class LiveMarkovBot:
             logger.error(f"❌ Exchange setup failed: {e}")
             raise
 
+    def setup_csv_logs(self):
+        """Initializes CSV files for persistent trade and portfolio logging."""
+        if not os.path.exists(TRADES_LOG_FILE):
+            with open(TRADES_LOG_FILE, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'type', 'price', 'btc_amount', 'usdt_value', 'pnl', 'reason'])
+        
+        if not os.path.exists(PORTFOLIO_LOG_FILE):
+            with open(PORTFOLIO_LOG_FILE, 'w', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow(['timestamp', 'btc_balance', 'usdt_balance', 'btc_price', 'total_value_usdt'])
+
+    def log_trade_to_csv(self, trade_data: dict):
+        """Appends a trade record to the CSV log."""
+        try:
+            with open(TRADES_LOG_FILE, 'a', newline='') as f:
+                writer = csv.DictWriter(f, fieldnames=trade_data.keys())
+                writer.writerow(trade_data)
+        except Exception as e:
+            logger.error(f"❌ Failed to log trade to CSV: {e}")
+
     def log_portfolio_state(self):
-        """Log current portfolio state for monitoring."""
+        """Log current portfolio state for monitoring and persist it to CSV."""
         try:
             balance = self.exchange.fetch_balance()
             ticker = self.exchange.fetch_ticker(self.symbol)
@@ -151,21 +179,27 @@ class LiveMarkovBot:
             btc_value = btc_balance * btc_price
             total_value = btc_value + usdt_balance
             
+            # Log to console
             logger.info(f"📊 Portfolio State:")
             logger.info(f"   BTC: {btc_balance:.6f} (${btc_value:.2f})")
             logger.info(f"   USDT: ${usdt_balance:.2f}")
             logger.info(f"   Total: ${total_value:.2f}")
             logger.info(f"   BTC Price: ${btc_price:.2f}")
             
-            # Store for history
+            # Persist to CSV for dashboard
+            now = datetime.now()
             self.portfolio_history.append({
-                'timestamp': datetime.now(),
+                'timestamp': now,
                 'btc_balance': btc_balance,
                 'usdt_balance': usdt_balance,
                 'btc_price': btc_price,
                 'total_value': total_value
             })
             
+            with open(PORTFOLIO_LOG_FILE, 'a', newline='') as f:
+                writer = csv.writer(f)
+                writer.writerow([now.isoformat(), btc_balance, usdt_balance, btc_price, total_value])
+
             return total_value
             
         except Exception as e:
@@ -501,136 +535,151 @@ class LiveMarkovBot:
                 return False
             
             price = market_data['price']
-            balance = self.exchange.fetch_balance()
             
             if signal == 'BUY':
                 usdt_balance = balance.get('USDT', {}).get('free', 0)
-                trade_amount = usdt_balance * self.position_size_pct  # 25% position
+                trade_amount = usdt_balance * self.position_size_pct
                 
-                if trade_amount < 10:  # Minimum trade size
-                    logger.warning("⚠️ Trade amount too small")
+                if trade_amount < 10:
+                    logger.warning("⚠️ BUY amount too small, skipping trade.")
                     return False
                 
                 btc_amount = trade_amount / price
                 
-                # Execute market buy
                 order = self.exchange.create_market_buy_order(self.symbol, btc_amount)
                 
                 logger.info(f"✅ BUY executed: {btc_amount:.6f} BTC @ ${price:.2f}")
                 logger.info(f"💰 Amount: ${trade_amount:.2f} | Reason: {reason}")
                 
-                # Track position for stop loss
                 position = {
-                    'type': 'long',
-                    'entry_price': price,
-                    'btc_amount': btc_amount,
-                    'entry_time': datetime.now(),
-                    'stop_loss': price * (1 - self.stop_loss_pct),
+                    'type': 'long', 'entry_price': price, 'btc_amount': btc_amount,
+                    'entry_time': datetime.now(), 'stop_loss': price * (1 - self.stop_loss_pct),
                     'order_id': order['id']
                 }
                 self.active_positions.append(position)
                 
-                self.send_notification(
-                    f"🟢 BUY: {btc_amount:.6f} BTC @ ${price:.2f}\n"
-                    f"💰 ${trade_amount:.2f} | {reason}", 
-                    "SUCCESS"
-                )
+                self.log_trade_to_csv({
+                    'timestamp': datetime.now().isoformat(), 'type': 'BUY', 'price': price,
+                    'btc_amount': btc_amount, 'usdt_value': trade_amount, 'pnl': 0, 'reason': reason
+                })
                 
+                self.send_notification(
+                    f"🟢 BUY: {btc_amount:.6f} BTC @ ${price:.2f}\n💰 ${trade_amount:.2f} | {reason}", "SUCCESS")
+                
+                self.total_trades += 1
+                self.daily_trade_count += 1
+                return True
+
             elif signal == 'SELL':
+                balance = self.exchange.fetch_balance()
                 btc_balance = balance.get('BTC', {}).get('free', 0)
-                btc_to_sell = btc_balance * self.position_size_pct  # 25% of holdings
+                btc_to_sell = btc_balance * self.position_size_pct
                 
-                if btc_to_sell < 0.001:  # Minimum BTC amount
-                    logger.warning("⚠️ BTC amount too small to sell")
-                    return False
-                
-                # Execute market sell
-                order = self.exchange.create_market_sell_order(self.symbol, btc_to_sell)
-                trade_value = btc_to_sell * price
-                
-                logger.info(f"✅ SELL executed: {btc_to_sell:.6f} BTC @ ${price:.2f}")
-                logger.info(f"💰 Amount: ${trade_value:.2f} | Reason: {reason}")
-                
-                # Update position tracking
-                self.close_long_positions(btc_to_sell, price)
-                
-                self.send_notification(
-                    f"🔴 SELL: {btc_to_sell:.6f} BTC @ ${price:.2f}\n"
-                    f"💰 ${trade_value:.2f} | {reason}", 
-                    "SUCCESS"
-                )
-            
-            # Update counters
-            self.daily_trade_count += 1
-            self.total_trades += 1
-            
-            return True
+                if btc_to_sell * price < 10:
+                     logger.warning("⚠️ SELL amount too small, skipping trade.")
+                     return False
+
+                return self.execute_and_log_sell(btc_to_sell, price, reason)
+
+            return False
             
         except Exception as e:
             logger.error(f"❌ Trade execution failed: {e}")
             self.send_notification(f"❌ Trade failed: {e}", "ERROR")
             return False
 
+    def execute_and_log_sell(self, btc_to_sell: float, price: float, reason: str):
+        """Executes a market sell, logs it, and updates position P&L."""
+        try:
+            if btc_to_sell < 0.0001: # Min tradeable amount
+                logger.warning(f"Attempted to sell {btc_to_sell}, which is too small. Skipping.")
+                return False
+
+            # Execute market sell
+            order = self.exchange.create_market_sell_order(self.symbol, btc_to_sell)
+            trade_value = btc_to_sell * price
+            
+            logger.info(f"✅ SELL executed: {btc_to_sell:.6f} BTC @ ${price:.2f}")
+            logger.info(f"💰 Amount: ${trade_value:.2f} | Reason: {reason}")
+            
+            # Close positions and calculate P&L
+            total_pnl = self.close_long_positions(btc_to_sell, price)
+            
+            # Log the aggregate sell trade
+            self.log_trade_to_csv({
+                'timestamp': datetime.now().isoformat(), 'type': 'SELL', 'price': price,
+                'btc_amount': btc_to_sell, 'usdt_value': trade_value, 'pnl': total_pnl, 'reason': reason
+            })
+            
+            self.send_notification(
+                f"🔴 SELL: {btc_to_sell:.6f} BTC @ ${price:.2f}\n"
+                f"💰 ${trade_value:.2f} | P&L: ${total_pnl:.2f}\nReason: {reason}", "SUCCESS")
+            
+            # Update counters
+            self.daily_trade_count += 1
+            self.total_trades += 1
+            return True
+
+        except Exception as e:
+            logger.error(f"❌ Sell execution logic failed: {e}")
+            self.send_notification(f"❌ Sell failed: {e}", "ERROR")
+            return False
+
     def close_long_positions(self, btc_sold: float, current_price: float):
-        """Close long positions and track P&L."""
-        btc_remaining = btc_sold
+        """
+        Closes long positions on a FIFO basis and calculates total P&L for the sold amount.
+        Returns the total P&L for this sell transaction.
+        """
+        btc_remaining_to_sell = btc_sold
+        total_pnl = 0
         positions_to_remove = []
         
+        # Iterate through a copy of the list to allow modification
         for i, position in enumerate(self.active_positions):
-            if position['type'] == 'long' and btc_remaining > 0:
-                btc_from_position = min(position['btc_amount'], btc_remaining)
+            if position['type'] == 'long' and btc_remaining_to_sell > 0:
+                btc_from_this_position = min(position['btc_amount'], btc_remaining_to_sell)
                 
-                # Calculate P&L
-                entry_price = position['entry_price']
-                pnl = (current_price - entry_price) * btc_from_position
+                # Calculate P&L for this part of the trade
+                pnl = (current_price - position['entry_price']) * btc_from_this_position
+                total_pnl += pnl
                 
                 if pnl > 0:
                     self.winning_trades += 1
-                    logger.info(f"📈 Winning trade: +${pnl:.2f}")
+                    logger.info(f"📈 Closed winning portion: +${pnl:.2f}")
                 else:
                     self.losing_trades += 1
-                    logger.info(f"📉 Losing trade: ${pnl:.2f}")
+                    logger.info(f"📉 Closed losing portion: ${pnl:.2f}")
                 
                 # Update position
-                position['btc_amount'] -= btc_from_position
-                btc_remaining -= btc_from_position
+                position['btc_amount'] -= btc_from_this_position
+                btc_remaining_to_sell -= btc_from_this_position
                 
-                if position['btc_amount'] <= 0.0001:
+                if position['btc_amount'] < 0.00001: # Epsilon for float comparison
                     positions_to_remove.append(i)
         
-        # Remove closed positions
-        for i in reversed(positions_to_remove):
+        # Remove fully closed positions from the list
+        for i in sorted(positions_to_remove, reverse=True):
             del self.active_positions[i]
+            
+        return total_pnl
 
     def check_stop_losses(self, current_price: float):
         """Check and execute stop losses."""
         try:
             stop_losses_executed = 0
             
+            # Iterate through a copy as the list might be modified
             for position in self.active_positions[:]:
                 if position['type'] == 'long' and current_price <= position['stop_loss']:
-                    # Execute stop loss
                     btc_to_sell = position['btc_amount']
+                    logger.warning(f"🛑 STOP LOSS triggered for position entered at ${position['entry_price']:.2f}. "
+                                   f"Current price ${current_price:.2f} <= Stop ${position['stop_loss']:.2f}")
                     
-                    try:
-                        order = self.exchange.create_market_sell_order(self.symbol, btc_to_sell)
-                        trade_value = btc_to_sell * current_price
-                        
-                        logger.warning(f"🛑 STOP LOSS: {btc_to_sell:.6f} BTC @ ${current_price:.2f}")
-                        logger.warning(f"💸 Loss: ${trade_value:.2f}")
-                        
-                        self.losing_trades += 1
-                        self.active_positions.remove(position)
+                    # Use the unified sell function
+                    success = self.execute_and_log_sell(btc_to_sell, current_price, "Stop Loss")
+                    
+                    if success:
                         stop_losses_executed += 1
-                        
-                        self.send_notification(
-                            f"🛑 STOP LOSS: {btc_to_sell:.6f} BTC @ ${current_price:.2f}\n"
-                            f"Entry: ${position['entry_price']:.2f} | Loss: ${trade_value:.2f}", 
-                            "WARNING"
-                        )
-                        
-                    except Exception as e:
-                        logger.error(f"❌ Stop loss execution failed: {e}")
             
             return stop_losses_executed
             
@@ -737,14 +786,18 @@ class LiveMarkovBot:
                     else:
                         logger.warning(f"⚠️ Trade execution failed")
                 
-                # Log portfolio state every hour
-                if self.total_trades % 12 == 0:  # Every 12 cycles (assuming 5min intervals)
-                    total_value = self.log_portfolio_state()
-                    
+                # Log portfolio state every 5 minutes
+                now = time.time()
+                if now - self.last_portfolio_log_time > 300:
+                    self.log_portfolio_state()
+                    self.last_portfolio_log_time = now
+
                     # Performance summary
                     if self.total_trades > 0:
-                        win_rate = (self.winning_trades / (self.winning_trades + self.losing_trades)) * 100
-                        logger.info(f"📊 Performance: {self.total_trades} trades, {win_rate:.1f}% win rate")
+                        win_rate = 0
+                        if (self.winning_trades + self.losing_trades) > 0:
+                            win_rate = (self.winning_trades / (self.winning_trades + self.losing_trades)) * 100
+                        logger.info(f"📊 Live Performance: {self.total_trades} trades, {win_rate:.1f}% win rate")
                 
                 # Sleep between checks (5 minutes)
                 time.sleep(300)
