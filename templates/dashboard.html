@@ -80,7 +80,7 @@
                                 <th>Type</th>
                                 <th>Price</th>
                                 <th>BTC Amount</th>
-                                <th>USDT Value</th>
+                                <th>USDC Value</th>
                                 <th>P&L</th>
                                 <th>Reason</th>
                             </tr>
@@ -96,7 +96,7 @@
                                 </td>
                                 <td>${{ "%.2f"|format(trade.price) }}</td>
                                 <td>{{ "%.6f"|format(trade.btc_amount) }}</td>
-                                <td>${{ "%.2f"|format(trade.usdt_value) }}</td>
+                                <td>${{ "%.2f"|format(trade.usdc_value) }}</td>
                                 <td class="text-{{ 'success' if trade.pnl > 0 else 'danger' if trade.pnl < 0 else 'muted' }}">
                                     {{ "$%.2f"|format(trade.pnl) if trade.pnl != 0 else "-" }}
                                 </td>
