@@ -539,6 +539,7 @@ class LiveMarkovBot:
                 return False
             
             price = market_data['price']
+            balance = self.exchange.fetch_balance()
             
             if signal == 'BUY':
                 usdt_balance = balance.get('USDT', {}).get('free', 0)
@@ -575,7 +576,6 @@ class LiveMarkovBot:
                 return True
 
             elif signal == 'SELL':
-                balance = self.exchange.fetch_balance()
                 btc_balance = balance.get('BTC', {}).get('free', 0)
                 btc_to_sell = btc_balance * self.position_size_pct
                 
