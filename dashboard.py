@@ -1,6 +1,5 @@
 from flask import Flask, render_template, Response, send_file
 import pandas as pd
-import sqlite3
 import io
 import os
 from matplotlib.backends.backend_agg import FigureCanvasAgg as FigureCanvas
