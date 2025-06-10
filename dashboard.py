@@ -70,7 +70,7 @@ def plot_portfolio():
             return send_file('static/no_data.png', mimetype='image/png')
             
         # Ensure required columns exist
-        required_columns = ['timestamp', 'total_value_usdt']
+        required_columns = ['timestamp', 'total_value_usdc']
         if not all(col in df.columns for col in required_columns):
             return send_file('static/no_data.png', mimetype='image/png')
         
@@ -82,9 +82,9 @@ def plot_portfolio():
         fig = Figure(figsize=(10, 5), tight_layout=True)
         ax = fig.add_subplot(111)
 
-        ax.plot(df['timestamp'], df['total_value_usdt'], marker='o', linestyle='-', color='#007bff')
+        ax.plot(df['timestamp'], df['total_value_usdc'], marker='o', linestyle='-', color='#007bff')
         
-        ax.set_title('Portfolio Value Over Time (USDT)', fontsize=16)
+        ax.set_title('Portfolio Value Over Time (USDC)', fontsize=16)
         ax.set_ylabel('Total Value ($)', fontsize=12)
         ax.grid(True, which='both', linestyle='--', linewidth=0.5)
         ax.tick_params(axis='x', labelrotation=45)
