@@ -489,8 +489,8 @@ class LiveMarkovBot:
             signal = None
             reason = ""
             
-            # BUY signals - Champion strategy conditions
-            if (rsi < 35 and  # Relaxed RSI threshold
+            # BUY signals - Champion strategy conditions (stricter)
+            if (rsi < 30 and  # Stricter RSI threshold
                 price < bb_lower and 
                 atr > atr_ma and 
                 price > ema_200 and
@@ -499,8 +499,8 @@ class LiveMarkovBot:
                 signal = 'BUY'
                 reason = f"Technical: RSI oversold ({rsi:.1f}), below BB lower"
             
-            # SELL signals - Champion strategy conditions  
-            elif ((rsi > 65 or price > bb_upper) and btc_balance > 0.001):
+            # SELL signals - Champion strategy conditions (stricter)
+            elif ((rsi > 70 or price > bb_upper) and btc_balance > 0.001): # Stricter RSI threshold
                 signal = 'SELL'
                 reason = f"Technical: RSI overbought ({rsi:.1f}) or above BB upper"
             
@@ -538,7 +538,7 @@ class LiveMarkovBot:
                 logger.warning("⚠️ Daily trade limit reached")
                 return False
             
-            price = market_data['price']
+            ticker = self.exchange.fetch_ticker(self.symbol)
             balance = self.exchange.fetch_balance()
             
             if signal == 'BUY':
@@ -549,27 +549,29 @@ class LiveMarkovBot:
                     logger.warning("⚠️ BUY amount too small, skipping trade.")
                     return False
                 
-                btc_amount = trade_amount / price
+                limit_price = ticker['ask'] # Use ask for limit buy
+                btc_amount = trade_amount / limit_price
                 
-                order = self.exchange.create_market_buy_order(self.symbol, btc_amount)
+                logger.info(f"Placing LIMIT BUY order for {btc_amount:.6f} BTC @ ${limit_price:.2f}")
+                order = self.exchange.create_limit_buy_order(self.symbol, btc_amount, limit_price)
                 
-                logger.info(f"✅ BUY executed: {btc_amount:.6f} BTC @ ${price:.2f}")
+                logger.info(f"✅ BUY order placed: {btc_amount:.6f} BTC @ ${limit_price:.2f}")
                 logger.info(f"💰 Amount: ${trade_amount:.2f} | Reason: {reason}")
                 
                 position = {
-                    'type': 'long', 'entry_price': price, 'btc_amount': btc_amount,
-                    'entry_time': datetime.now(), 'stop_loss': price * (1 - self.stop_loss_pct),
+                    'type': 'long', 'entry_price': limit_price, 'btc_amount': btc_amount,
+                    'entry_time': datetime.now(), 'stop_loss': limit_price * (1 - self.stop_loss_pct),
                     'order_id': order['id']
                 }
                 self.active_positions.append(position)
                 
                 self.log_trade_to_csv({
-                    'timestamp': datetime.now().isoformat(), 'type': 'BUY', 'price': price,
+                    'timestamp': datetime.now().isoformat(), 'type': 'BUY', 'price': limit_price,
                     'btc_amount': btc_amount, 'usdt_value': trade_amount, 'pnl': 0, 'reason': reason
                 })
                 
                 self.send_notification(
-                    f"🟢 BUY: {btc_amount:.6f} BTC @ ${price:.2f}\n💰 ${trade_amount:.2f} | {reason}", "SUCCESS")
+                    f"🟢 LIMIT BUY: {btc_amount:.6f} BTC @ ${limit_price:.2f}\n💰 ${trade_amount:.2f} | {reason}", "SUCCESS")
                 
                 self.total_trades += 1
                 self.daily_trade_count += 1
@@ -578,12 +580,13 @@ class LiveMarkovBot:
             elif signal == 'SELL':
                 btc_balance = balance.get('BTC', {}).get('free', 0)
                 btc_to_sell = btc_balance * self.position_size_pct
+                limit_price = ticker['bid'] # Use bid for limit sell
                 
-                if btc_to_sell * price < 10:
+                if btc_to_sell * limit_price < 10:
                      logger.warning("⚠️ SELL amount too small, skipping trade.")
                      return False
 
-                return self.execute_and_log_sell(btc_to_sell, price, reason)
+                return self.execute_and_log_sell(btc_to_sell, limit_price, reason, order_type='limit')
 
             return False
             
@@ -592,18 +595,26 @@ class LiveMarkovBot:
             self.send_notification(f"❌ Trade failed: {e}", "ERROR")
             return False
 
-    def execute_and_log_sell(self, btc_to_sell: float, price: float, reason: str):
-        """Executes a market sell, logs it, and updates position P&L."""
+    def execute_and_log_sell(self, btc_to_sell: float, price: float, reason: str, order_type: str = 'limit'):
+        """Executes a sell, logs it, and updates position P&L. Can be 'limit' or 'market'."""
         try:
             if btc_to_sell < 0.0001: # Min tradeable amount
                 logger.warning(f"Attempted to sell {btc_to_sell}, which is too small. Skipping.")
                 return False
 
-            # Execute market sell
-            order = self.exchange.create_market_sell_order(self.symbol, btc_to_sell)
+            # Execute sell order based on type
+            if order_type == 'limit':
+                logger.info(f"Placing LIMIT SELL order for {btc_to_sell:.6f} BTC @ ${price:.2f}")
+                order = self.exchange.create_limit_sell_order(self.symbol, btc_to_sell, price)
+                notification_prefix = "🔴 LIMIT SELL"
+            else: # Default to market for safety (e.g., stop losses)
+                logger.info(f"Placing MARKET SELL order for {btc_to_sell:.6f} BTC (Stop Loss)")
+                order = self.exchange.create_market_sell_order(self.symbol, btc_to_sell)
+                notification_prefix = "🛑 STOP LOSS"
+
             trade_value = btc_to_sell * price
             
-            logger.info(f"✅ SELL executed: {btc_to_sell:.6f} BTC @ ${price:.2f}")
+            logger.info(f"✅ {order_type.upper()} SELL executed: {btc_to_sell:.6f} BTC @ ~${price:.2f}")
             logger.info(f"💰 Amount: ${trade_value:.2f} | Reason: {reason}")
             
             # Close positions and calculate P&L
@@ -611,12 +622,12 @@ class LiveMarkovBot:
             
             # Log the aggregate sell trade
             self.log_trade_to_csv({
-                'timestamp': datetime.now().isoformat(), 'type': 'SELL', 'price': price,
+                'timestamp': datetime.now().isoformat(), 'type': order_type.upper() + '_SELL', 'price': price,
                 'btc_amount': btc_to_sell, 'usdt_value': trade_value, 'pnl': total_pnl, 'reason': reason
             })
             
             self.send_notification(
-                f"🔴 SELL: {btc_to_sell:.6f} BTC @ ${price:.2f}\n"
+                f"{notification_prefix}: {btc_to_sell:.6f} BTC @ ${price:.2f}\n"
                 f"💰 ${trade_value:.2f} | P&L: ${total_pnl:.2f}\nReason: {reason}", "SUCCESS")
             
             # Update counters
@@ -679,8 +690,8 @@ class LiveMarkovBot:
                     logger.warning(f"🛑 STOP LOSS triggered for position entered at ${position['entry_price']:.2f}. "
                                    f"Current price ${current_price:.2f} <= Stop ${position['stop_loss']:.2f}")
                     
-                    # Use the unified sell function
-                    success = self.execute_and_log_sell(btc_to_sell, current_price, "Stop Loss")
+                    # Use the unified sell function, ensuring it's a market order for safety
+                    success = self.execute_and_log_sell(btc_to_sell, current_price, "Stop Loss", order_type='market')
                     
                     if success:
                         stop_losses_executed += 1

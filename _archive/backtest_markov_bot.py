@@ -343,9 +343,9 @@ class MarkovBotBacktester:
         signal = None
         reason = ""
         
-        # Technical analysis signals - FIXED conditions
-        # BUY: Oversold conditions with trend support
-        if (row['rsi'] < 35 and  # Relaxed from 30 to 35
+        # Technical analysis signals - MORE SELECTIVE
+        # BUY: More extreme oversold conditions
+        if (row['rsi'] < 30 and  # Stricter: Changed from 35 to 30
             current_price < row['bb_lower'] and 
             row['atr'] > row['atr_ma'] and 
             current_price > row['ema_200'] and
@@ -354,8 +354,8 @@ class MarkovBotBacktester:
             signal = 'BUY'
             reason = f"Technical: RSI oversold ({row['rsi']:.1f}), below BB lower"
         
-        # SELL: Take profits or exit overbought - FIXED for mixed portfolio
-        elif (row['rsi'] > 65 or current_price > row['bb_upper']) and self.btc_holdings > 0.001:
+        # SELL: More extreme overbought conditions
+        elif (row['rsi'] > 70 or current_price > row['bb_upper']) and self.btc_holdings > 0.001: # Stricter: Changed from 65 to 70
             signal = 'SELL'
             reason = f"Technical: RSI overbought ({row['rsi']:.1f}) or above BB upper"
         
@@ -599,7 +599,7 @@ class MarkovBotBacktester:
                     transition_matrix = new_matrix
                 
             # Check stop losses first
-            stop_losses_executed = self.check_stop_losses(current_price, current_row.name)
+            self.check_stop_losses(current_price, current_row.name)
             
             # Generate signal
             signal, reason = self.generate_signal(full_df_idx, df_full, transition_matrix)
@@ -618,7 +618,7 @@ class MarkovBotBacktester:
                 'btc_holdings': self.btc_holdings,
                 'cash_balance': self.current_balance,
                 'active_positions': len(self.active_positions),
-                'stop_losses_today': stop_losses_executed
+                'stop_losses_today': 0
             })
             
             # Progress update
@@ -686,7 +686,7 @@ class MarkovBotBacktester:
         print("\n" + "="*60)
         print("🎯 BACKTEST RESULTS")
         print("="*60)
-        print(f"📅 Period: {portfolio_df['timestamp'].iloc[0]} to {portfolio_df['timestamp'].iloc[-1]}")
+        print(f"�� Period: {portfolio_df['timestamp'].iloc[0]} to {portfolio_df['timestamp'].iloc[-1]}")
         print(f"⏱️  Duration: {len(portfolio_df)} hours ({len(portfolio_df)/24:.1f} days)")
         
         print(f"\n💰 PORTFOLIO PERFORMANCE:")
