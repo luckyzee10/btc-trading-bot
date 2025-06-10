@@ -537,76 +537,72 @@ class MarkovBotBacktester:
         
         return len(stop_loss_trades)  # Return number of stop losses executed
 
-    def run_backtest(self, days=365):
-        """Run the complete backtest."""
-        print(f"\n🚀 Starting {days}-day backtest...")
+    def run_backtest(self, days=400):
+        """Run the complete backtest with date filtering."""
+        print(f"\n🚀 Starting backtest from {self.start_date} to {self.end_date}...")
         
-        # Fetch data
-        df = self.fetch_historical_data(days)
+        # Fetch data with a buffer
+        df_full = self.fetch_historical_data(days)
         
-        if df is None or len(df) < 1500:
-            print(f"❌ Insufficient data: need at least 1500 hours, got {len(df) if df is not None else 0}")
+        if df_full is None or len(df_full) < 200:
+            print(f"❌ Insufficient data fetched.")
             return None
         
-        # Calculate indicators
+        # Calculate indicators on the full dataframe
         print("📊 Calculating technical indicators...")
-        df = self.calculate_indicators(df)
+        df_full = self.calculate_indicators(df_full)
         
-        # Build transition matrix (this handles training period internally)
-        transition_matrix = self.build_transition_matrix(df)
+        # Filter to the specific date range for the backtest
+        start_dt = pd.to_datetime(self.start_date)
+        end_dt = pd.to_datetime(self.end_date)
         
-        # Determine test period start (after training + indicator warmup)
-        available_data = len(df)
-        min_train = 1000
-        max_train = available_data // 3
-        actual_train_period = max(min_train, min(1000, max_train))
-        test_period_start = actual_train_period + 200  # Skip 200 periods for indicator warmup
+        df = df_full.loc[start_dt:end_dt].copy().dropna()
         
-        if available_data < test_period_start + 100:
-            print(f"❌ Insufficient data: need at least {test_period_start + 100} periods, have {available_data}")
+        if len(df) < 100:
+            print(f"❌ Not enough data in the specified range {self.start_date} to {self.end_date}")
             return None
+            
+        # Build transition matrix from data *before* the test period
+        train_data = df_full.loc[:start_dt].dropna(subset=['markov_state'])
+        if len(train_data) < 200:
+             print("⚠️ Not enough pre-test data for training. Using start of test period.")
+             train_data = df.iloc[:len(df)//5].dropna(subset=['markov_state'])
         
-        print(f"📊 Test period: {available_data - test_period_start} hours ({(available_data - test_period_start)/24:.1f} days)")
-        
-        # Initialize starting values - NEW: Calculate mixed portfolio value
-        initial_price = df['close'].iloc[test_period_start]
+        transition_matrix = self.build_transition_matrix(train_data)
+
+        # Initialize starting values
+        initial_price = df['close'].iloc[0]
         self.entry_price = initial_price
         initial_btc_value = self.starting_btc_amount * initial_price
         initial_portfolio_value = initial_btc_value + self.current_balance
         
         print(f"💰 Starting portfolio breakdown:")
-        print(f"   BTC value: ${initial_btc_value:,.2f} ({initial_btc_value/initial_portfolio_value*100:.1f}%)")
-        print(f"   Cash value: ${self.current_balance:,.2f} ({self.current_balance/initial_portfolio_value*100:.1f}%)")
         print(f"   Total value: ${initial_portfolio_value:,.2f}")
-        print(f"📅 Backtest period: {df.index[test_period_start]} to {df.index[-1]}")
-        print(f"⏱️  Total periods to simulate: {len(df) - test_period_start}")
+        print(f"📅 Backtest period: {df.index[0]} to {df.index[-1]}")
+        print(f"⏱️  Total periods to simulate: {len(df)}")
         
         # Main backtest loop
         print("\n📈 Running simulation...")
         
-        for i in range(test_period_start, len(df)):
+        for i in range(len(df)):
             current_row = df.iloc[i]
             current_price = current_row['close']
             
-            # NEW: Check if we need to rebuild the transition matrix (weekly)
+            # Find index in full dataframe for matrix rebuilding
+            full_df_idx = df_full.index.get_loc(current_row.name)
+
             if (self.enable_weekly_rebuild and 
-                i > test_period_start + self.matrix_training_window and  # Ensure we have enough data
-                i - self.last_matrix_rebuild >= self.rebuild_frequency_hours):
+                i > 0 and i - self.last_matrix_rebuild >= self.rebuild_frequency_hours):
                 
-                print(f"\n🔄 Time for weekly matrix rebuild (hour {i}, last rebuild: {self.last_matrix_rebuild})")
-                new_matrix = self.rebuild_transition_matrix(df, i)
+                new_matrix = self.rebuild_transition_matrix(df_full, full_df_idx)
                 if new_matrix is not None:
                     transition_matrix = new_matrix
-                    print("✅ Matrix successfully updated with recent market data")
-                else:
-                    print("❌ Matrix rebuild failed, continuing with existing matrix")
-                print("")  # Add spacing after matrix rebuild
-            
+                
             # Check stop losses first
             stop_losses_executed = self.check_stop_losses(current_price, current_row.name)
             
             # Generate signal
-            signal, reason = self.generate_signal(i, df, transition_matrix)
+            signal, reason = self.generate_signal(full_df_idx, df_full, transition_matrix)
             
             # Execute trade if signal
             if signal:
@@ -626,8 +622,8 @@ class MarkovBotBacktester:
             })
             
             # Progress update
-            if i % 500 == 0:  # Less frequent updates for longer backtests
-                progress = ((i - test_period_start) / (len(df) - test_period_start)) * 100
+            if i > 0 and i % (len(df) // 10) == 0:
+                progress = (i / len(df)) * 100
                 active_pos = len(self.active_positions)
                 rebuilds = self.matrix_rebuild_count
                 print(f"   Progress: {progress:.1f}% - Portfolio: ${portfolio_value:,.2f} - Active positions: {active_pos} - Matrix rebuilds: {rebuilds}")
@@ -817,36 +813,30 @@ class MarkovBotBacktester:
         plt.show()
 
 def main():
-    """Run the backtest for the SAME 1-YEAR PERIOD as other bots for comparison."""
-    print("🔬 BACKTEST MARKOV BOT: LAST 1 YEAR")
+    """Run the backtest for the specified period June 2024 - June 2025."""
+    print("🔬 BACKTEST MARKOV BOT: June 2024 - June 2025")
     print("="*60)
-    print("Testing classic Markov approach for same period as other bots:")
-    print("• 50/50 BTC/Cash starting split")
-    print("• 25% position sizing with 8% stop losses")
-    print("• Weekly matrix rebuilding")
-    print("• Spot trading only (no leverage)")
-    print("Testing Period: Last 365 days (same as other bots)")
-    print("")
+    print("Testing classic Markov approach for the same period as the Stacker bot.")
     
-    # Calculate last 365 days - SAME PERIOD as other bots
-    from datetime import datetime, timedelta
-    end_date = datetime.now()
-    start_date = end_date - timedelta(days=365)
+    # Set the specific date range
+    start_date = "2024-06-01"
+    end_date = "2025-06-01"
     
-    # Create backtest Markov bot for same 1-year period
+    # Create backtest Markov bot for the specified period
     backtester = MarkovBotBacktester(
-        start_date=start_date.strftime('%Y-%m-%d'),
-        end_date=end_date.strftime('%Y-%m-%d'),
+        start_date=start_date,
+        end_date=end_date,
         enable_weekly_rebuild=True,
         rebuild_frequency_hours=168,  # 7 days (weekly rebuilds)
         matrix_training_window=1000   # ~42 days training window
     )
     
-    # Run backtest simulation for full year comparison
-    results = backtester.run_backtest(days=400)  # Same data fetch as others
+    # Fetch enough data to cover the period plus a buffer for training
+    days_to_fetch = (pd.to_datetime(end_date) - pd.to_datetime(start_date)).days + 45 
+    results = backtester.run_backtest(days=days_to_fetch)
     
     if results:
-        print(f"\n🎯 BACKTEST MARKOV BOT RESULTS for 1 YEAR!")
+        print(f"\n🎯 BACKTEST MARKOV BOT RESULTS!")
         print(f"Total return: {results['total_return']:+.2f}%")
         print(f"Buy & hold return: {results['buy_hold_return']:+.2f}%")
         print(f"Strategy outperformance: {results['total_return'] - results['buy_hold_return']:+.2f}%")
@@ -855,71 +845,12 @@ def main():
         print(f"Win rate: {results['win_rate']:.1f}%")
         print(f"Matrix rebuilds: {backtester.matrix_rebuild_count}")
         
-        # Calculate annualized metrics
-        portfolio_df = results['portfolio_df']
-        if len(portfolio_df) > 0:
-            # Calculate actual test period
-            test_period_days = (portfolio_df['timestamp'].max() - portfolio_df['timestamp'].min()).days
-            
-            # Growth multiple from total return
-            growth_multiple = 1 + (results['total_return'] / 100)
-            buy_hold_multiple = 1 + (results['buy_hold_return'] / 100)
-            
-            # Annualize based on actual test period
-            if test_period_days > 0:
-                annualized_return = ((growth_multiple ** (365/test_period_days)) - 1) * 100
-                annualized_buy_hold = ((buy_hold_multiple ** (365/test_period_days)) - 1) * 100
-                
-                print(f"\n📊 ANNUALIZED METRICS:")
-                print(f"   Backtest Strategy: {annualized_return:+.1f}%")
-                print(f"   Buy & Hold: {annualized_buy_hold:+.1f}%")
-                print(f"   Annualized Alpha: {annualized_return - annualized_buy_hold:+.1f}%")
-                print(f"   Test Period: {test_period_days} days")
-        
-        # Save results with 1-year suffix for comparison
+        # Save results with a specific name for this test
         if len(results['trades_df']) > 0:
-            results['trades_df'].to_csv('backtest_markov_1_year_trades.csv', index=False)
-        results['portfolio_df'].to_csv('backtest_markov_1_year_portfolio.csv', index=False)
+            results['trades_df'].to_csv('backtest_markov_2024_2025_trades.csv', index=False)
+        results['portfolio_df'].to_csv('backtest_markov_2024_2025_portfolio.csv', index=False)
         
-        print(f"\n💾 Results saved:")
-        print(f"   backtest_markov_1_year_trades.csv")
-        print(f"   backtest_markov_1_year_portfolio.csv")
-        
-        # Strategy characteristics
-        print(f"\n🎯 BACKTEST MARKOV STRATEGY CHARACTERISTICS:")
-        print(f"   • Classic Markov chain approach with weekly rebuilds")
-        print(f"   • Conservative 25% position sizing")
-        print(f"   • 8% stop losses for risk management")
-        print(f"   • 50/50 BTC/Cash starting allocation")
-        print(f"   • Technical indicators + Markov state prediction")
-        print(f"   • Weekly matrix adaptation to market changes")
-        
-        # Trading activity insights
-        if len(results['trades_df']) > 0:
-            total_trades = len(results['trades_df'])
-            print(f"   • Trade frequency: {total_trades} trades in {test_period_days} days")
-            print(f"   • Weekly trade rate: {total_trades*7/test_period_days:.1f} trades per week")
-            
-            # Trade type breakdown
-            trades_df = results['trades_df']
-            buy_trades = len(trades_df[trades_df['signal'] == 'BUY'])
-            sell_trades = len(trades_df[trades_df['signal'] == 'SELL'])
-            stop_losses = len(trades_df[trades_df['signal'] == 'STOP_LOSS'])
-            
-            print(f"   • Trade breakdown: {buy_trades} BUY, {sell_trades} SELL, {stop_losses} STOP_LOSS")
-        
-        # Risk metrics
-        max_dd = results['max_drawdown']
-        total_ret = results['total_return']
-        if max_dd != 0:
-            risk_efficiency = total_ret / abs(max_dd)
-            print(f"   • Risk efficiency: {risk_efficiency:.2f} (return per unit of drawdown)")
-        
-        return results
-        
-    else:
-        print("❌ Backtest Markov bot simulation failed!")
-        return None
+        print(f"\n💾 Results saved to 'backtest_markov_2024_2025_...' files.")
 
 if __name__ == "__main__":
     main() 

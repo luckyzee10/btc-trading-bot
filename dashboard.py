@@ -61,9 +61,24 @@ def dashboard():
 def plot_portfolio():
     """Generates and serves the portfolio value chart."""
     try:
+        # Check if file exists and has data
+        if not os.path.exists(PORTFOLIO_LOG_FILE):
+            return send_file('static/no_data.png', mimetype='image/png')
+            
         df = pd.read_csv(PORTFOLIO_LOG_FILE)
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        if df.empty:
+            return send_file('static/no_data.png', mimetype='image/png')
+            
+        # Ensure required columns exist
+        required_columns = ['timestamp', 'total_value_usdt']
+        if not all(col in df.columns for col in required_columns):
+            return send_file('static/no_data.png', mimetype='image/png')
         
+        # Convert timestamp and ensure data is sorted
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df = df.sort_values('timestamp')
+        
+        # Create the plot
         fig = Figure(figsize=(10, 5), tight_layout=True)
         ax = fig.add_subplot(111)
 
@@ -85,8 +100,8 @@ def plot_portfolio():
         FigureCanvas(fig).print_png(output)
         return Response(output.getvalue(), mimetype='image/png')
 
-    except (FileNotFoundError, pd.errors.EmptyDataError, IndexError):
-        # Return a placeholder image if data is not available
+    except Exception as e:
+        app.logger.error(f"Error generating portfolio plot: {e}")
         return send_file('static/no_data.png', mimetype='image/png')
 
 if __name__ == '__main__':
