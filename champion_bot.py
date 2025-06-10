@@ -154,12 +154,12 @@ class LiveMarkovBot:
         if not os.path.exists(TRADES_LOG_FILE):
             with open(TRADES_LOG_FILE, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['timestamp', 'type', 'price', 'btc_amount', 'usdt_value', 'pnl', 'reason'])
+                writer.writerow(['timestamp', 'type', 'price', 'btc_amount', 'usdc_value', 'pnl', 'reason'])
         
         if not os.path.exists(PORTFOLIO_LOG_FILE):
             with open(PORTFOLIO_LOG_FILE, 'w', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow(['timestamp', 'btc_balance', 'usdt_balance', 'btc_price', 'total_value_usdt'])
+                writer.writerow(['timestamp', 'btc_balance', 'usdc_balance', 'btc_price', 'total_value_usdc'])
 
     def log_trade_to_csv(self, trade_data: dict):
         """Appends a trade record to the CSV log."""
@@ -177,16 +177,16 @@ class LiveMarkovBot:
             ticker = self.exchange.fetch_ticker(self.symbol)
             
             btc_balance = balance.get('BTC', {}).get('total', 0)
-            usdt_balance = balance.get('USDT', {}).get('total', 0)
+            usdc_balance = balance.get('USDC', {}).get('total', 0)
             btc_price = ticker['last']
             
             btc_value = btc_balance * btc_price
-            total_value = btc_value + usdt_balance
+            total_value = btc_value + usdc_balance
             
             # Log to console
             logger.info(f"📊 Portfolio State:")
             logger.info(f"   BTC: {btc_balance:.6f} (${btc_value:.2f})")
-            logger.info(f"   USDT: ${usdt_balance:.2f}")
+            logger.info(f"   USDC: ${usdc_balance:.2f}")
             logger.info(f"   Total: ${total_value:.2f}")
             logger.info(f"   BTC Price: ${btc_price:.2f}")
             
@@ -195,14 +195,14 @@ class LiveMarkovBot:
             self.portfolio_history.append({
                 'timestamp': now,
                 'btc_balance': btc_balance,
-                'usdt_balance': usdt_balance,
+                'usdc_balance': usdc_balance,
                 'btc_price': btc_price,
                 'total_value': total_value
             })
             
             with open(PORTFOLIO_LOG_FILE, 'a', newline='') as f:
                 writer = csv.writer(f)
-                writer.writerow([now.isoformat(), btc_balance, usdt_balance, btc_price, total_value])
+                writer.writerow([now.isoformat(), btc_balance, usdc_balance, btc_price, total_value])
 
             return total_value
             
@@ -484,7 +484,7 @@ class LiveMarkovBot:
             # Get current balances
             balance = self.exchange.fetch_balance()
             btc_balance = balance.get('BTC', {}).get('free', 0)
-            usdt_balance = balance.get('USDT', {}).get('free', 0)
+            usdc_balance = balance.get('USDC', {}).get('free', 0)
             
             signal = None
             reason = ""
@@ -494,7 +494,7 @@ class LiveMarkovBot:
                 price < bb_lower and 
                 atr > atr_ma and 
                 price > ema_200 and
-                usdt_balance > 100):  # Have cash to buy
+                usdc_balance > 100):  # Have cash to buy
                 
                 signal = 'BUY'
                 reason = f"Technical: RSI oversold ({rsi:.1f}), below BB lower"
@@ -512,7 +512,7 @@ class LiveMarkovBot:
                 if (signal is None and 
                     next_state in BULLISH_STATES and 
                     probability >= MARKOV_CONFIDENCE_THRESHOLD and 
-                    usdt_balance > 100):
+                    usdc_balance > 100):
                     
                     signal = 'BUY'
                     reason = f"Markov: {current_state}→{next_state} ({probability:.0%})"
@@ -542,8 +542,8 @@ class LiveMarkovBot:
             balance = self.exchange.fetch_balance()
             
             if signal == 'BUY':
-                usdt_balance = balance.get('USDT', {}).get('free', 0)
-                trade_amount = usdt_balance * self.position_size_pct
+                usdc_balance = balance.get('USDC', {}).get('free', 0)
+                trade_amount = usdc_balance * self.position_size_pct
                 
                 if trade_amount < 10:
                     logger.warning("⚠️ BUY amount too small, skipping trade.")
@@ -567,7 +567,7 @@ class LiveMarkovBot:
                 
                 self.log_trade_to_csv({
                     'timestamp': datetime.now().isoformat(), 'type': 'BUY', 'price': limit_price,
-                    'btc_amount': btc_amount, 'usdt_value': trade_amount, 'pnl': 0, 'reason': reason
+                    'btc_amount': btc_amount, 'usdc_value': trade_amount, 'pnl': 0, 'reason': reason
                 })
                 
                 self.send_notification(
@@ -623,7 +623,7 @@ class LiveMarkovBot:
             # Log the aggregate sell trade
             self.log_trade_to_csv({
                 'timestamp': datetime.now().isoformat(), 'type': order_type.upper() + '_SELL', 'price': price,
-                'btc_amount': btc_to_sell, 'usdt_value': trade_value, 'pnl': total_pnl, 'reason': reason
+                'btc_amount': btc_to_sell, 'usdc_value': trade_value, 'pnl': total_pnl, 'reason': reason
             })
             
             self.send_notification(
